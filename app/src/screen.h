@@ -123,6 +123,8 @@ struct sc_screen_params {
     struct sc_mouse_bindings mouse_bindings;
     bool legacy_paste;
     bool clipboard_autosync;
+    bool clipboard_sync;
+    bool clipboard_push_on_start;
     uint8_t shortcut_mods; // OR of enum sc_shortcut_mod values
 
     const char *window_title;

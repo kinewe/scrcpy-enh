@@ -1,10 +1,13 @@
+# 备份文件（迭代过程中的 .bak 快照）
+*.bak
+*.bak.*
+
+# 构建产物
+prebuilt/
 build/
-/dist/
-/build-*/
-/build_*/
-/release-*/
-.idea/
+dist/
+
+# 临时文件
+*.log
+*.tmp
 .gradle/
-/x/
-local.properties
-/scrcpy-server

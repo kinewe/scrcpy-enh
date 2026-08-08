@@ -767,6 +767,8 @@ aoa_complete:
             .mouse_bindings = options->mouse_bindings,
             .legacy_paste = options->legacy_paste,
             .clipboard_autosync = options->clipboard_autosync,
+            .clipboard_sync = options->clipboard_sync,
+            .clipboard_push_on_start = options->clipboard_push_on_start,
             .shortcut_mods = options->shortcut_mods,
             .window_title = window_title,
             .always_on_top = options->always_on_top,

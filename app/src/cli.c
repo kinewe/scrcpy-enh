@@ -49,6 +49,8 @@ enum {
     OPT_TUNNEL_HOST,
     OPT_TUNNEL_PORT,
     OPT_NO_CLIPBOARD_AUTOSYNC,
+    OPT_NO_CLIPBOARD_SYNC,
+    OPT_NO_CLIPBOARD_PUSH_ON_START,
     OPT_TCPIP,
     OPT_RAW_KEY_EVENTS,
     OPT_NO_DOWNSIZE_ON_ERROR,
@@ -639,6 +641,24 @@ static const struct sc_option options[] = {
                 "This option disables this automatic synchronization."
     },
     {
+        .longopt_id = OPT_NO_CLIPBOARD_SYNC,
+        .longopt = "no-clipboard-sync",
+        .text = "By default, scrcpy automatically synchronizes the computer "
+                "clipboard (text or image) to the device clipboard whenever "
+                "it changes on the computer, without pasting.\n"
+                "This option disables this automatic synchronization."
+    },
+    {
+        .longopt_id = OPT_NO_CLIPBOARD_PUSH_ON_START,
+        .longopt = "no-clipboard-push-on-start",
+
+        .text = "By default, scrcpy pushes the current computer clipboard "
+                "(text or image) to the device clipboard when it starts.\n"
+                "This option disables this startup push (useful when scrcpy "
+                "is restarted automatically for a mode switch, e.g. USB to "
+                "wireless, to avoid pushing the same content again)."
+    },
+    {
         .longopt_id = OPT_NO_DOWNSIZE_ON_ERROR,
         .longopt = "no-downsize-on-error",
         .text = "By default, on MediaCodec error, scrcpy automatically tries "
@@ -1169,6 +1189,11 @@ static const struct sc_shortcut shortcuts[] = {
     {
         .shortcuts = { "MOD+c" },
         .text = "Copy to clipboard (inject COPY keycode, Android >= 7 only)",
+    },
+    {
+        .shortcuts = { "MOD+Shift+c" },
+        .text = "Copy computer clipboard (image or text) to the device "
+                "clipboard without pasting",
     },
     {
         .shortcuts = { "MOD+x" },
@@ -2733,6 +2758,13 @@ parse_args_with_getopt(struct scrcpy_cli_args *args, int argc, char *argv[],
             case OPT_NO_CLIPBOARD_AUTOSYNC:
                 opts->clipboard_autosync = false;
                 break;
+            case OPT_NO_CLIPBOARD_SYNC:
+                opts->clipboard_sync = false;
+                break;
+            case OPT_NO_CLIPBOARD_PUSH_ON_START:
+                opts->clipboard_push_on_start = false;
+                break;
+
             case OPT_TCPIP:
                 opts->tcpip = true;
                 opts->tcpip_dst = optarg;

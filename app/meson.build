@@ -21,6 +21,7 @@ src = [
     'src/fps_counter.c',
     'src/frame_buffer.c',
     'src/input_manager.c',
+    'src/image_convert.c',
     'src/keyboard_sdk.c',
     'src/mouse_capture.c',
     'src/mouse_sdk.c',
@@ -127,6 +128,7 @@ dependencies = [
     dependency('libavcodec', version: '>= 57.37', static: static),
     dependency('libavutil', static: static),
     dependency('libswresample', static: static),
+    dependency('libswscale', static: static),
     dependency('sdl3', version: '>= 3.2.0', static: static),
 ]
 
@@ -141,6 +143,7 @@ endif
 if host_machine.system() == 'windows'
     dependencies += cc.find_library('mingw32')
     dependencies += cc.find_library('ws2_32')
+    dependencies += cc.find_library('imm32')
 endif
 
 check_functions = [

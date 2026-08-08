@@ -49,6 +49,7 @@ public class ControlMessageReader {
             case ControlMessage.TYPE_RESET_VIDEO:
             case ControlMessage.TYPE_CAMERA_ZOOM_IN:
             case ControlMessage.TYPE_CAMERA_ZOOM_OUT:
+            case ControlMessage.TYPE_SAVE_CLIPBOARD_IMAGE_TO_GALLERY:
                 return ControlMessage.createEmpty(type);
             case ControlMessage.TYPE_UHID_CREATE:
                 return parseUhidCreate();
@@ -64,6 +65,8 @@ public class ControlMessageReader {
                 return parseResizeDisplay();
             case ControlMessage.TYPE_SCAN_FILE:
                 return parseScanFile();
+            case ControlMessage.TYPE_SET_IMAGE_CLIPBOARD:
+                return parseSetImageClipboard();
             default:
                 throw new ControlProtocolException("Unknown event type: " + type);
         }
@@ -188,6 +191,14 @@ public class ControlMessageReader {
     private ControlMessage parseScanFile() throws IOException {
         String path = parseString();
         return ControlMessage.createScanFile(path);
+    }
+
+    private ControlMessage parseSetImageClipboard() throws IOException {
+        long sequence = dis.readLong();
+        boolean paste = dis.readByte() != 0;
+        String mimeType = parseString();
+        byte[] data = parseByteArray(4); // Read image data
+        return ControlMessage.createSetImageClipboard(sequence, paste, mimeType, data);
     }
 
     private Position parsePosition() throws IOException {

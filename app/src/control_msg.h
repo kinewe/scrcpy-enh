@@ -12,7 +12,7 @@
 #include "coords.h"
 #include "hid/hid_event.h"
 
-#define SC_CONTROL_MSG_MAX_SIZE (1 << 18) // 256k
+#define SC_CONTROL_MSG_MAX_SIZE (1 << 28) // 256M (lossless large image clipboard support)
 
 #define SC_CONTROL_MSG_INJECT_TEXT_MAX_LENGTH 300
 // type: 1 byte; sequence: 8 bytes; paste flag: 1 byte; length: 4 bytes
@@ -50,6 +50,11 @@ enum sc_control_msg_type {
     SC_CONTROL_MSG_TYPE_CAMERA_ZOOM_OUT,
     SC_CONTROL_MSG_TYPE_RESIZE_DISPLAY,
     SC_CONTROL_MSG_TYPE_SCAN_FILE,
+    SC_CONTROL_MSG_TYPE_SET_IMAGE_CLIPBOARD,
+    // No argument: the server copies the most recent clipboard image file
+    // (already stored in the device clipboard cache) to the gallery and
+    // triggers a media scan, so it appears in the gallery app.
+    SC_CONTROL_MSG_TYPE_SAVE_CLIPBOARD_IMAGE_TO_GALLERY,
 };
 
 enum sc_copy_key {
@@ -121,6 +126,13 @@ struct sc_control_msg {
         struct {
             bool on;
         } camera_set_torch;
+        struct {
+            uint64_t sequence;
+            uint8_t *data; // owned, to be freed by free()
+            uint32_t size;
+            char *mimetype; // owned, to be freed by free()
+            bool paste;
+        } set_image_clipboard;
         struct {
             uint16_t width;
             uint16_t height;

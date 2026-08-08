@@ -665,6 +665,8 @@ sc_screen_init(struct sc_screen *screen,
         .mouse_bindings = params->mouse_bindings,
         .legacy_paste = params->legacy_paste,
         .clipboard_autosync = params->clipboard_autosync,
+        .clipboard_sync = params->clipboard_sync,
+        .clipboard_push_on_start = params->clipboard_push_on_start,
         .shortcut_mods = params->shortcut_mods,
     };
 

@@ -3,10 +3,12 @@
 #include <assert.h>
 #include <inttypes.h>
 #include <stdlib.h>
+#include <string.h>
 #include <SDL3/SDL_clipboard.h>
 
 #include "device_msg.h"
 #include "events.h"
+#include "input_manager.h"
 #include "util/log.h"
 #include "util/str.h"
 #include "util/thread.h"
@@ -17,6 +19,28 @@ struct sc_uhid_output_task_data {
     uint16_t size;
     uint8_t *data;
 };
+
+struct sc_image_clipboard_data {
+    uint8_t *data;
+    uint32_t size;
+    char *mimetype;
+};
+
+static const void * SDLCALL
+clipboard_data_callback(void *userdata, const char *mime_type, size_t *size) {
+    struct sc_image_clipboard_data *image_data = userdata;
+    (void) mime_type;
+    *size = image_data->size;
+    return image_data->data;
+}
+
+static void SDLCALL
+clipboard_cleanup_callback(void *userdata) {
+    struct sc_image_clipboard_data *image_data = userdata;
+    free(image_data->data);
+    free(image_data->mimetype);
+    free(image_data);
+}
 
 bool
 sc_receiver_init(struct sc_receiver *receiver, sc_socket control_socket,
@@ -57,12 +81,56 @@ task_set_clipboard(void *userdata) {
         bool ok = SDL_SetClipboardText(text);
         if (ok) {
             LOGI("Device clipboard copied");
+            // The next SDL_EVENT_CLIPBOARD_UPDATE comes from this reverse
+            // synchronization, ignore it to avoid an infinite loop
+            sc_input_manager_mark_clipboard_reverse_sync();
         } else {
             LOGE("Could not set clipboard: %s", SDL_GetError());
         }
     }
 
     free(text);
+}
+
+static void
+task_set_image_clipboard(void *userdata) {
+    assert(sc_thread_is_main());
+
+    struct sc_device_msg *msg = userdata;
+
+    struct sc_image_clipboard_data *image_data =
+        malloc(sizeof(struct sc_image_clipboard_data));
+    if (!image_data) {
+        LOG_OOM();
+        free(msg->image_clipboard.data);
+        free(msg->image_clipboard.mimetype);
+        free(msg);
+        return;
+    }
+
+    image_data->data = msg->image_clipboard.data;
+    image_data->size = msg->image_clipboard.size;
+    image_data->mimetype = msg->image_clipboard.mimetype;
+
+    const char *mime_types[1] = { image_data->mimetype };
+
+    bool ok = SDL_SetClipboardData(clipboard_data_callback,
+                                    clipboard_cleanup_callback,
+                                    image_data,
+                                    mime_types, 1);
+    if (ok) {
+        LOGI("Device image clipboard copied");
+        // The next SDL_EVENT_CLIPBOARD_UPDATE comes from this reverse
+        // synchronization, ignore it to avoid an infinite loop
+        sc_input_manager_mark_clipboard_reverse_sync();
+    } else {
+        LOGE("Could not set image clipboard: %s", SDL_GetError());
+        free(image_data->data);
+        free(image_data->mimetype);
+        free(image_data);
+    }
+
+    free(msg);
 }
 
 static void
@@ -89,6 +157,46 @@ process_msg(struct sc_receiver *receiver, struct sc_device_msg *msg) {
             if (!ok) {
                 LOGW("Could not post clipboard to main thread");
                 free(text);
+                return;
+            }
+
+            break;
+        }
+        case DEVICE_MSG_TYPE_IMAGE_CLIPBOARD: {
+            // Create a copy of the message to send to the main thread
+            struct sc_device_msg *msg_copy = malloc(sizeof(struct sc_device_msg));
+            if (!msg_copy) {
+                LOG_OOM();
+                return;
+            }
+
+            msg_copy->type = DEVICE_MSG_TYPE_IMAGE_CLIPBOARD;
+            msg_copy->image_clipboard.data = malloc(msg->image_clipboard.size);
+            if (!msg_copy->image_clipboard.data) {
+                LOG_OOM();
+                free(msg_copy);
+                return;
+            }
+            memcpy(msg_copy->image_clipboard.data, msg->image_clipboard.data, msg->image_clipboard.size);
+            msg_copy->image_clipboard.size = msg->image_clipboard.size;
+
+            // Duplicate the mimetype string
+            size_t mimetype_len = strlen(msg->image_clipboard.mimetype);
+            msg_copy->image_clipboard.mimetype = malloc(mimetype_len + 1);
+            if (!msg_copy->image_clipboard.mimetype) {
+                LOG_OOM();
+                free(msg_copy->image_clipboard.data);
+                free(msg_copy);
+                return;
+            }
+            strcpy(msg_copy->image_clipboard.mimetype, msg->image_clipboard.mimetype);
+
+            bool ok = sc_run_on_main_thread(task_set_image_clipboard, msg_copy, false);
+            if (!ok) {
+                LOGW("Could not post image clipboard to main thread");
+                free(msg_copy->image_clipboard.data);
+                free(msg_copy->image_clipboard.mimetype);
+                free(msg_copy);
                 return;
             }
 
@@ -185,7 +293,14 @@ static int
 run_receiver(void *data) {
     struct sc_receiver *receiver = data;
 
-    static uint8_t buf[DEVICE_MSG_MAX_SIZE];
+    // Allocate dynamically: DEVICE_MSG_MAX_SIZE may be large (64M) to support
+    // large image clipboard messages sent back from the server.
+    uint8_t *buf = malloc(DEVICE_MSG_MAX_SIZE);
+    if (!buf) {
+        LOGE("Could not allocate receiver buffer");
+        receiver->cbs->on_ended(receiver, true, receiver->cbs_userdata);
+        return -1;
+    }
     size_t head = 0;
 
     bool error = false;
@@ -215,6 +330,7 @@ run_receiver(void *data) {
         }
     }
 
+    free(buf);
     receiver->cbs->on_ended(receiver, error, receiver->cbs_userdata);
 
     return 0;

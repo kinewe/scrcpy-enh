@@ -3,6 +3,7 @@ package com.genymobile.scrcpy.control;
 import com.genymobile.scrcpy.AndroidVersions;
 import com.genymobile.scrcpy.AsyncProcessor;
 import com.genymobile.scrcpy.CleanUp;
+import com.genymobile.scrcpy.FakeContext;
 import com.genymobile.scrcpy.Options;
 import com.genymobile.scrcpy.device.Device;
 import com.genymobile.scrcpy.display.DisplayInfo;
@@ -19,6 +20,7 @@ import com.genymobile.scrcpy.video.SurfaceCapture;
 import com.genymobile.scrcpy.video.VideoSource;
 import com.genymobile.scrcpy.video.VirtualDisplayListener;
 import com.genymobile.scrcpy.wrappers.ClipboardManager;
+import com.genymobile.scrcpy.wrappers.ClipboardManager.ClipboardImage;
 import com.genymobile.scrcpy.wrappers.InputManager;
 import com.genymobile.scrcpy.wrappers.ServiceManager;
 
@@ -147,14 +149,32 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
             // If control and autosync are enabled, synchronize Android clipboard to the computer automatically
             if (clipboardManager != null) {
                 clipboardManager.addPrimaryClipChangedListener(() -> {
-                    if (isSettingClipboard.get()) {
-                        // This is a notification for the change we are currently applying, ignore it
-                        return;
-                    }
-                    String text = Device.getClipboardText();
-                    if (text != null) {
-                        DeviceMessage msg = DeviceMessage.createClipboard(text);
-                        sender.send(msg);
+                    // This callback runs on the main thread: any uncaught exception would crash the server.
+                    // Reading the image clipboard may throw (SecurityException, FileNotFoundException...) when
+                    // another app is reading the URI or the file is temporarily inaccessible, so protect the
+                    // whole callback and never let a clipboard sync failure kill the server.
+                    try {
+                        if (isSettingClipboard.get()) {
+                            // This is a notification for the change we are currently applying, ignore it
+                            return;
+                        }
+                        // Check for image clipboard first
+                        ClipboardImage clipboardImage = Device.getClipboardImage();
+                        if (clipboardImage != null && clipboardImage.data().length > 0) {
+                            // Send image clipboard data
+                            DeviceMessage msg = DeviceMessage.createImageClipboard(clipboardImage.data(), clipboardImage.mimeType());
+                            sender.send(msg);
+                        } else {
+                            // Fall back to text clipboard
+                            String text = Device.getClipboardText();
+                            if (text != null) {
+                                DeviceMessage msg = DeviceMessage.createClipboard(text);
+                                sender.send(msg);
+                            }
+                        }
+                    } catch (Throwable e) {
+                        // Never crash the server because of a clipboard synchronization failure
+                        Ln.e("Failed to synchronize clipboard from device", e);
                     }
                 });
             } else {
@@ -384,6 +404,9 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
                 case ControlMessage.TYPE_SET_CLIPBOARD:
                     setClipboard(msg.getText(), msg.getPaste(), msg.getSequence());
                     return true;
+                case ControlMessage.TYPE_SET_IMAGE_CLIPBOARD:
+                    setImageClipboard(msg.getSequence(), msg.getPaste(), msg.getText(), msg.getData()); // text field contains mimeType
+                    return true;
                 case ControlMessage.TYPE_SET_DISPLAY_POWER:
                     if (supportsInputEvents) {
                         setDisplayPower(msg.getOn());
@@ -415,6 +438,8 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
                     return true;
                 case ControlMessage.TYPE_SCAN_FILE:
                     scanFile(msg.getText());
+                case ControlMessage.TYPE_SAVE_CLIPBOARD_IMAGE_TO_GALLERY:
+                    saveClipboardImageToGallery();
                     return true;
                 default:
                     // fall through
@@ -696,10 +721,19 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
         // particular when COPY or CUT are injected, so it should not be synchronized twice. On Android < 7, do not synchronize at all rather than
         // copying an old clipboard content.
         if (!clipboardAutosync) {
-            String clipboardText = Device.getClipboardText();
-            if (clipboardText != null) {
-                DeviceMessage msg = DeviceMessage.createClipboard(clipboardText);
+            // Try to get image clipboard first
+            ClipboardImage clipboardImage = Device.getClipboardImage();
+            if (clipboardImage != null && clipboardImage.data().length > 0) {
+                // Send image clipboard data
+                DeviceMessage msg = DeviceMessage.createImageClipboard(clipboardImage.data(), clipboardImage.mimeType());
                 sender.send(msg);
+            } else {
+                // Fall back to text clipboard
+                String clipboardText = Device.getClipboardText();
+                if (clipboardText != null) {
+                    DeviceMessage msg = DeviceMessage.createClipboard(clipboardText);
+                    sender.send(msg);
+                }
             }
         }
     }
@@ -710,6 +744,28 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
         isSettingClipboard.set(false);
         if (ok) {
             Ln.i("Device clipboard set");
+        }
+
+        // On Android >= 7, also press the PASTE key if requested
+        if (paste && Build.VERSION.SDK_INT >= AndroidVersions.API_24_ANDROID_7_0 && supportsInputEvents) {
+            pressReleaseKeycode(KeyEvent.KEYCODE_PASTE, Device.INJECT_MODE_ASYNC);
+        }
+
+        if (sequence != ControlMessage.SEQUENCE_INVALID) {
+            // Acknowledgement requested
+            DeviceMessage msg = DeviceMessage.createAckClipboard(sequence);
+            sender.send(msg);
+        }
+
+        return ok;
+    }
+
+    private boolean setImageClipboard(long sequence, boolean paste, String mimeType, byte[] imageData) {
+        isSettingClipboard.set(true);
+        boolean ok = Device.setClipboardImage(imageData, mimeType);
+        isSettingClipboard.set(false);
+        if (ok) {
+            Ln.i("Device image clipboard set");
         }
 
         // On Android >= 7, also press the PASTE key if requested
@@ -889,5 +945,25 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
         } catch (Throwable t) {
             Ln.e("MediaStore scan failed for " + path, t);
         }
+    }
+
+    private void saveClipboardImageToGallery() {
+        ClipboardManager clipboardManager = ServiceManager.getClipboardManager();
+        String savedPath = clipboardManager.saveLatestImageToGallery();
+        if (savedPath != null) {
+            // Direct file write fallback: trigger a media scan so the gallery
+            // app picks it up. MediaScannerConnection is the reliable API on
+            // modern Android; the broadcast is a fallback for older versions.
+            Ln.i("Saved clipboard image to gallery: " + savedPath);
+            try {
+                android.media.MediaScannerConnection.scanFile(
+                        FakeContext.get(), new String[]{savedPath}, null, null);
+            } catch (Throwable t) {
+                Ln.e("MediaScannerConnection scan failed", t);
+            }
+            scanFile(savedPath);
+        }
+        // savedPath == null: either the save failed (already logged) or the
+        // image was inserted via MediaStore (also already logged).
     }
 }
