@@ -1,5 +1,7 @@
 @echo off
 setlocal enabledelayedexpansion
+rem 清理上次 watcher 切换标记（防残留误判"插线切换"）
+del /q "%TEMP%\scrcpy_watch_switch.flag" >nul 2>&1
 cd /d "%~dp0"
 
 rem ============================================
@@ -225,6 +227,12 @@ call :stop_usb_watch
 echo.
 rem ----- 按退出码区分：0=正常关闭窗口（投屏结束，退出循环）；非0=异常断开（自动重连）-----
 if "!CAST_RC!"=="0" (
+    rem 区分"用户关窗"与"watcher 切换（插线）"：watcher 温和关闭 scrcpy 前会写标记文件
+    if exist "%TEMP%\scrcpy_watch_switch.flag" (
+        del /q "%TEMP%\scrcpy_watch_switch.flag" >nul 2>&1
+        echo [自动切换] 检测到 USB 插线，切换至有线投屏...
+        goto :main
+    )
     echo [提示] 已检测到窗口关闭（退出码 0），投屏已结束，退出投屏循环
     timeout /t 1 /nobreak >nul
     exit /b 0
@@ -467,7 +475,7 @@ rem   进程自行退出条件：检测到 USB 或 scrcpy 已不存在
 rem ============================================
 :start_usb_watch
 call :stop_usb_watch
-start "!WATCH_TAG!" /b powershell -NoProfile -WindowStyle Hidden -Command "$WATCH_TAG='!WATCH_TAG!';$adb='!ADB!';while($true){if(-not(Get-Process scrcpy -ErrorAction SilentlyContinue)){break};$u=& $adb devices 2>$null|Select-Object -Skip 1|Where-Object{$_ -match '\S+\s+(device|unauthorized|offline)\s*$' -and $_ -notmatch ':' -and $_ -notmatch '_adb-tls' -and $_ -notmatch 'emulator'};if($u){Stop-Process -Name scrcpy -Force -ErrorAction SilentlyContinue;break};Start-Sleep -Seconds !WATCH_INTERVAL!}"
+start "!WATCH_TAG!" /b powershell -NoProfile -WindowStyle Hidden -Command "$WATCH_TAG='!WATCH_TAG!';$adb='!ADB!';while($true){if(-not(Get-Process scrcpy -ErrorAction SilentlyContinue)){break};$u=& $adb devices 2>$null|Select-Object -Skip 1|Where-Object{$_ -match '\S+\s+(device|unauthorized|offline)\s*$' -and $_ -notmatch ':' -and $_ -notmatch '_adb-tls' -and $_ -notmatch 'emulator'};if($u){Set-Content -Path "$env:TEMP\scrcpy_watch_switch.flag" -Value 1;$wp=Get-Process scrcpy -ErrorAction SilentlyContinue|Where-Object{$_.MainWindowHandle -ne 0};if($wp){[void]$wp.CloseMainWindow()};$dl=(Get-Date).AddSeconds(5);while((Get-Process scrcpy -ErrorAction SilentlyContinue) -and (Get-Date)-lt $dl){Start-Sleep -Milliseconds 200};Get-Process scrcpy -ErrorAction SilentlyContinue|Stop-Process -Force -ErrorAction SilentlyContinue;break};Start-Sleep -Seconds !WATCH_INTERVAL!}"
 exit /b
 
 rem ============================================
