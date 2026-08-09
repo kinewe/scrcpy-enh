@@ -2,7 +2,7 @@
 
 基于 [scrcpy 4.1](https://github.com/Genymobile/scrcpy) 的自定义构建，专为「电脑 ↔ Android 移动设备」的高效协同打造。
 
-> 当前主线分支：`feat/uhid-external-keyboard`（uhid 键盘伪装外部物理键盘里程碑）
+> 🎉 **v1.2 已正式发布**（master 分支）——[Release 下载](https://github.com/kinewe/PC-kinewe-yinmo/releases/tag/v1.2)
 
 ---
 
@@ -46,8 +46,7 @@
 ### 双击启动
 
 ```
-启动.bat            # 有线/无线自动切换 + uhid 键盘（推荐）
-手机投屏.bat        # 备用脚本（逻辑一致）
+手机投屏.bat        # 有线/无线自动切换 + uhid 键盘（推荐）
 ```
 
 ### 手动启动 uhid 模式
@@ -59,7 +58,7 @@ scrcpy.exe --keyboard=uhid --serial <设备序列号> \
 
 ### ⚠️ 电脑侧注意事项
 
-- **键盘布局**：使用 uhid 打中文时，电脑键盘布局请切换为「英语（美国）美式键盘」，避免电脑输入法（如搜狗）拦截按键（自动切换布局功能开发中）
+- **键盘布局**：**焦点自动切换已实现**——投屏窗口获焦自动切「英语（美国）美式键盘」，失焦/退出自动恢复原布局，无需手动干预，电脑输入法（搜狗等）不会拦截按键
 - **小米便签**：该 App 会拦截物理键盘按键为快捷键，测试请用微信/浏览器等普通输入框
 
 ---
@@ -89,13 +88,13 @@ cd app && ninja
 | `server/.../control/UhidManager.java` | UHID 设备创建，bus 伪装（0x03） |
 | `app/src/uhid/keyboard_uhid.c` | 键盘设备 ID/名称伪装 |
 | `app/src/input_manager.c` | 剪贴板同步、快捷键处理 |
-| `packaging/启动.bat` | 投屏主脚本 |
+| `packaging/手机投屏.bat` | 投屏主脚本 |
 
 ---
 
 ## 📦 版本历史
 
-- **v1.2（进行中）**：uhid 键盘伪装外部物理键盘（bus 0x03 + 焦点笔 ID）
+- **v1.2（已发布）**：uhid 键盘伪装外部物理键盘（bus 0x03 + 焦点笔 ID）、焦点布局自动切换（获焦英语/失焦恢复）、有线无线互切修复（watcher 温和关闭）、tcpip 端口检查、bat 更名「手机投屏.bat」
 - **v1.1**：有线/无线自动切换、WiFi IP 学习、tcpip 死循环修复、bat 纳入版本管理
 - **v1.0**：图片剪贴板增强 + 剪贴板自动同步 + 保存相册
 
