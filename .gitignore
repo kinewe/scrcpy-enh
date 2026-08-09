@@ -11,3 +11,6 @@ dist/
 *.log
 *.tmp
 .gradle/
+
+# local build config
+local.properties

@@ -10,8 +10,8 @@ rem ============================================
 set "SCRIPT_DIR=%~dp0"
 set "CONFIG_FILE=%SCRIPT_DIR%config.txt"
 rem ----- 串流参数：有线 USB 带宽充足用高规格；无线带宽有限保持低延迟 -----
-set "USB_ARGS=--video-codec=h264 --video-bit-rate=50M --max-size 2560 --max-fps 120 --video-codec-options="max-b-frames:int=0,bitrate-mode:int=1,i-frame-interval:int=1" --render-driver=direct3d --video-buffer=0"
-set "WIFI_ARGS=--video-codec=h264 --video-bit-rate=15M --max-size 1920 --max-fps 60"
+set "USB_ARGS=--keyboard=uhid --video-codec=h264 --video-bit-rate=50M --max-size 2560 --max-fps 120 --video-codec-options="max-b-frames:int=0,bitrate-mode:int=1,i-frame-interval:int=1" --render-driver=direct3d --video-buffer=0"
+set "WIFI_ARGS=--keyboard=uhid --video-codec=h264 --video-bit-rate=15M --max-size 1920 --max-fps 60"
 
 rem ===== 自动切换投屏模式参数 =====
 set "WATCH_TAG=YINMO_USB_WATCH"
