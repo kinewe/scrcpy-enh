@@ -326,6 +326,17 @@ scrcpy(struct scrcpy_options *options) {
 #endif
     struct scrcpy *s = &scrcpy;
 
+#ifdef _WIN32
+    // Record the real system keyboard layout before SDL initializes: after
+    // SDL_Init(VIDEO), GetKeyboardLayout(0) on the scrcpy thread returns the
+    // Preload default of the thread, which may differ from the user's actual
+    // layout. This value is passed to the screen and used as the original
+    // layout to restore on focus loss / exit.
+    HKL startup_hkl = GetKeyboardLayout(0);
+#else
+    HKL startup_hkl = NULL; // unused on non-Windows
+#endif
+
     // Minimal SDL initialization
     if (!SDL_Init(SDL_INIT_EVENTS)) {
         LOGE("Could not initialize SDL: %s", SDL_GetError());
@@ -766,6 +777,9 @@ aoa_complete:
             .gp = gp,
             .hid_keyboard = options->keyboard_input_mode
                 == SC_KEYBOARD_INPUT_MODE_UHID,
+#ifdef _WIN32
+            .startup_hkl = (void *) startup_hkl,
+#endif
             .mouse_bindings = options->mouse_bindings,
             .legacy_paste = options->legacy_paste,
             .clipboard_autosync = options->clipboard_autosync,

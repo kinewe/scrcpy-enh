@@ -500,6 +500,9 @@ sc_screen_init(struct sc_screen *screen,
     screen->original_hkl = NULL;
     screen->en_hkl = NULL;
     screen->layout_forced = false;
+    screen->ime_open_saved = false;
+    screen->ime_open_saved_valid = false;
+    screen->startup_hkl = params->startup_hkl;
 #endif
 
     screen->video = params->video;
@@ -1213,7 +1216,14 @@ sc_screen_apply_keyboard_layout(struct sc_screen *screen, bool english) {
             return;
         }
         if (!screen->original_hkl) {
-            screen->original_hkl = (void *) GetKeyboardLayout(0);
+            // Prefer the layout captured before SDL initialization: after
+            // SDL_Init(VIDEO), GetKeyboardLayout(0) returns the Preload
+            // default of the scrcpy thread, which may differ from the
+            // user's actual system layout (problem B: restore switched to
+            // the wrong layout).
+            screen->original_hkl = screen->startup_hkl
+                                       ? screen->startup_hkl
+                                       : (void *) GetKeyboardLayout(0);
         }
         // Activate the English (US) keyboard layout. TSF input methods
         // (Sogou, Microsoft Pinyin...) are bound to their own keyboard
@@ -1226,12 +1236,25 @@ sc_screen_apply_keyboard_layout(struct sc_screen *screen, bool english) {
         }
         // Also close the IME open status via IMM32 (best effort: TSF IMEs
         // may ignore it, the layout switch above is the main mechanism).
+        // Save the original open status first so that focus loss restores
+        // it exactly: unconditionally reopening the IME under the ENG
+        // layout makes TSF activate the Chinese IME, which switches the
+        // layout away (problem B).
         HIMC imc = ImmGetContext(hwnd);
         if (imc) {
+            if (!screen->ime_open_saved_valid) {
+                screen->ime_open_saved = ImmGetOpenStatus(imc) != FALSE;
+                screen->ime_open_saved_valid = true;
+            }
             ImmSetOpenStatus(imc, FALSE);
             ImmReleaseContext(hwnd, imc);
         }
-        LOGI("IME layout forced to English (00000409)");
+        LOGI("IME layout forced to English (00000409), original 0x%08lx%s, "
+             "IME open saved=%d",
+             (unsigned long) (uintptr_t) screen->original_hkl,
+             screen->startup_hkl ? " (startup)" : " (thread)",
+             screen->ime_open_saved_valid ? (screen->ime_open_saved ? 1 : 0)
+                                          : -1);
     } else if (screen->original_hkl) {
         // Restore the user's original keyboard layout. The IME open status
         // must be restored symmetrically: focus gained closed it via
@@ -1243,13 +1266,25 @@ sc_screen_apply_keyboard_layout(struct sc_screen *screen, bool english) {
         HIMC imc = ImmGetContext(hwnd);
         bool ime_open = false;
         if (imc) {
-            ImmSetOpenStatus(imc, TRUE);
-            ime_open = ImmGetOpenStatus(imc) != FALSE;
+            if (screen->ime_open_saved_valid) {
+                // Symmetric restore of the state recorded at focus gain
+                // (unconditionally reopening the IME under the ENG layout
+                // would trigger TSF to activate the Chinese IME and switch
+                // the layout away).
+                ImmSetOpenStatus(imc, screen->ime_open_saved);
+                ime_open = ImmGetOpenStatus(imc) != FALSE;
+            } else {
+                // No saved state (no IME context when focus was gained):
+                // fall back to reopening the IME, best effort.
+                ImmSetOpenStatus(imc, TRUE);
+                ime_open = ImmGetOpenStatus(imc) != FALSE;
+            }
             ImmReleaseContext(hwnd, imc);
         }
-        LOGI("IME layout restored (0x%08lx), IME open=%d%s",
+        LOGI("IME layout restored (0x%08lx), IME open=%d%s%s",
              (unsigned long) (uintptr_t) screen->original_hkl, ime_open ? 1 : 0,
-             imc ? "" : " (no IME context: no IME installed on this system)");
+             imc ? "" : " (no IME context: no IME installed on this system)",
+             screen->ime_open_saved_valid ? "" : " (no saved IME state)");
         LOGI("IME: %s",
              ime_open ? "open (Chinese IME usable)" : "closed or unavailable");
         // Restore the system-wide layout (browser and other windows), not

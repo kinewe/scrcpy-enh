@@ -123,6 +123,16 @@ struct sc_screen {
     // Whether the English layout is currently forced on this thread (idempotent
     // focus gain: avoid re-activating the layout on every focus event).
     bool layout_forced;
+    // IME open status saved when focus was gained (before forcing English),
+    // restored symmetrically on focus loss / exit. Unconditionally reopening
+    // the IME would trigger TSF to activate the Chinese IME under the ENG
+    // layout, switching the layout away (problem B).
+    bool ime_open_saved;
+    bool ime_open_saved_valid;
+    // Real system keyboard layout captured before SDL initialization:
+    // GetKeyboardLayout(0) after SDL_Init may return the Preload default of
+    // the scrcpy thread instead of the user's actual layout.
+    void *startup_hkl;
 #endif
 };
 
@@ -141,6 +151,11 @@ struct sc_screen_params {
     // layout while the window has focus so the computer IME does not
     // interfere with the injected keys.
     bool hid_keyboard;
+#ifdef _WIN32
+    // Keyboard layout captured before SDL initialization (see
+    // sc_screen.startup_hkl).
+    void *startup_hkl;
+#endif
 
     struct sc_mouse_bindings mouse_bindings;
     bool legacy_paste;
