@@ -282,6 +282,11 @@ if exist "%CONFIG_FILE%" (
 set "NEED_TCPIP="
 if not defined SAVED_IP set "NEED_TCPIP=1"
 if not "!SAVED_IP!"=="!WIFI_IP!:5555" set "NEED_TCPIP=1"
+rem 即使 IP 未变：设备重启后 adbd 的无线调试端口会丢失（5555 不再监听），
+rem 必须检查端口实际状态，未开启则重新执行 tcpip；端口已开才跳过（避免无谓重启 adbd）
+set "TCP_PORT="
+for /f "delims=" %%p in ('adb -s !USB_DEV! shell getprop service.adb.tcp.port 2^>nul') do set "TCP_PORT=%%p"
+if not "!TCP_PORT:~0,4!"=="5555" set "NEED_TCPIP=1"
 if defined NEED_TCPIP (
     echo [学习] 开启无线调试端口（adb tcpip 5555）...
     adb -s !USB_DEV! tcpip 5555 >nul 2>&1
