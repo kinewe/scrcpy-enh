@@ -29,6 +29,15 @@ public final class UhidManager {
 
     // Linux: include/uapi/linux/input.h
     private static final short BUS_VIRTUAL = 0x06;
+    // Diagnostic finding (Xiaomi Pad 8 Pro, HyperOS/Android 16): with
+    // BUS_BLUETOOTH (0x05) the UHID device claims the Bluetooth bus but has
+    // no bluetoothAddress, and the system marks it "Enabled: false"
+    // (dumpsys input) -> InputReader drops every event -> the scrcpy window
+    // cannot type anything. Switching to BUS_HID (0x03) keeps the device
+    // classified as KEYBOARD | EXTERNAL / IsExternal: true, but the system
+    // leaves it enabled and input is dispatched normally (verified with
+    // getevent + InputDispatcher RecentQueue).
+    private static final short BUS_HID = 0x03;
 
     private static final int SIZE_OF_UHID_EVENT = 4380; // sizeof(struct uhid_event)
 
@@ -202,7 +211,7 @@ public final class UhidManager {
 
         buf.position(4 + 256);
         buf.putShort((short) reportDesc.length);
-        buf.putShort(BUS_VIRTUAL);
+        buf.putShort(BUS_HID); // MUST be HID (0x03), not BLUETOOTH: see BUS_HID comment
         buf.putInt(vendorId);
         buf.putInt(productId);
         buf.putInt(0); // version

@@ -1,5 +1,7 @@
 @echo off
 setlocal enabledelayedexpansion
+rem 清理上次 watcher 切换标记（防残留误判"插线切换"）
+del /q "%TEMP%\scrcpy_watch_switch.flag" >nul 2>&1
 title 投屏高清版 - 有线高清 / 无线低延迟
 
 rem ============================================
@@ -10,8 +12,8 @@ rem ============================================
 set "SCRIPT_DIR=%~dp0"
 set "CONFIG_FILE=%SCRIPT_DIR%config.txt"
 rem ----- 串流参数：有线 USB 带宽充足用高规格；无线带宽有限保持低延迟 -----
-set "USB_ARGS=--video-codec=h264 --video-bit-rate=50M --max-size 2560 --max-fps 120 --video-codec-options="max-b-frames:int=0,bitrate-mode:int=1,i-frame-interval:int=1" --render-driver=direct3d --video-buffer=0"
-set "WIFI_ARGS=--video-codec=h264 --video-bit-rate=15M --max-size 1920 --max-fps 60"
+set "USB_ARGS=--keyboard=uhid --video-codec=h264 --video-bit-rate=50M --max-size 2560 --max-fps 120 --video-codec-options="max-b-frames:int=0,bitrate-mode:int=1,i-frame-interval:int=1" --render-driver=direct3d --video-buffer=0"
+set "WIFI_ARGS=--keyboard=uhid --video-codec=h264 --video-bit-rate=15M --max-size 1920 --max-fps 60"
 
 rem ===== 自动切换投屏模式参数 =====
 set "WATCH_TAG=YINMO_USB_WATCH"
@@ -184,6 +186,12 @@ call :stop_usb_watch
 echo.
 rem ----- 按退出码区分：0=正常关闭窗口（投屏结束，退出循环）；非0=异常断开（自动重连）-----
 if "!CAST_RC!"=="0" (
+    rem 区分"用户关窗"与"watcher 切换（插线）"：watcher 温和关闭 scrcpy 前会写标记文件
+    if exist "%TEMP%\scrcpy_watch_switch.flag" (
+        del /q "%TEMP%\scrcpy_watch_switch.flag" >nul 2>&1
+        echo [自动切换] 检测到 USB 插线，切换至有线投屏...
+        goto :main
+    )
     echo [提示] 已检测到窗口关闭（退出码 0），投屏已结束，退出投屏循环
     call :stop_usb_watch
     timeout /t 1 /nobreak >nul
@@ -282,6 +290,11 @@ if exist "%CONFIG_FILE%" (
 set "NEED_TCPIP="
 if not defined SAVED_IP set "NEED_TCPIP=1"
 if not "!SAVED_IP!"=="!WIFI_IP!:5555" set "NEED_TCPIP=1"
+rem 即使 IP 未变：设备重启后 adbd 的无线调试端口会丢失（5555 不再监听），
+rem 必须检查端口实际状态，未开启则重新执行 tcpip；端口已开才跳过（避免无谓重启 adbd）
+set "TCP_PORT="
+for /f "delims=" %%p in ('adb -s !USB_DEV! shell getprop service.adb.tcp.port 2^>nul') do set "TCP_PORT=%%p"
+if not "!TCP_PORT:~0,4!"=="5555" set "NEED_TCPIP=1"
 if defined NEED_TCPIP (
     echo [学习] 开启无线调试端口（adb tcpip 5555）...
     adb -s !USB_DEV! tcpip 5555 >nul 2>&1
@@ -408,7 +421,7 @@ rem   进程自行退出条件：检测到 USB 或 scrcpy 已不存在
 rem ============================================
 :start_usb_watch
 call :stop_usb_watch
-start "!WATCH_TAG!" /b powershell -NoProfile -WindowStyle Hidden -Command "$WATCH_TAG='!WATCH_TAG!';while($true){if(-not(Get-Process scrcpy -ErrorAction SilentlyContinue)){break};$u=adb devices 2>$null|Select-Object -Skip 1|Where-Object{$_ -match '\S+\s+device\s*$' -and $_ -notmatch ':' -and $_ -notmatch '_adb-tls'};if($u){Stop-Process -Name scrcpy -Force -ErrorAction SilentlyContinue;break};Start-Sleep -Seconds !WATCH_INTERVAL!}"
+start "!WATCH_TAG!" /b powershell -NoProfile -WindowStyle Hidden -Command "$WATCH_TAG='!WATCH_TAG!';while($true){if(-not(Get-Process scrcpy -ErrorAction SilentlyContinue)){break};$u=adb devices 2>$null|Select-Object -Skip 1|Where-Object{$_ -match '\S+\s+device\s*$' -and $_ -notmatch ':' -and $_ -notmatch '_adb-tls'};if($u){Set-Content -Path "$env:TEMP\scrcpy_watch_switch.flag" -Value 1;$wp=Get-Process scrcpy -ErrorAction SilentlyContinue|Where-Object{$_.MainWindowHandle -ne 0};if($wp){[void]$wp.CloseMainWindow()};$dl=(Get-Date).AddSeconds(5);while((Get-Process scrcpy -ErrorAction SilentlyContinue) -and (Get-Date)-lt $dl){Start-Sleep -Milliseconds 200};Get-Process scrcpy -ErrorAction SilentlyContinue|Stop-Process -Force -ErrorAction SilentlyContinue;break};Start-Sleep -Seconds !WATCH_INTERVAL!}"
 exit /b
 
 rem ============================================

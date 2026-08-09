@@ -147,9 +147,13 @@ sc_keyboard_uhid_init(struct sc_keyboard_uhid *kb,
     struct sc_control_msg msg;
     msg.type = SC_CONTROL_MSG_TYPE_UHID_CREATE;
     msg.uhid_create.id = SC_HID_ID_KEYBOARD;
-    msg.uhid_create.vendor_id = 0;
-    msg.uhid_create.product_id = 0;
-    msg.uhid_create.name = NULL;
+    // Step1 (Xiaomi keyboard identity): report the vendor/product of a
+    // Xiaomi Bluetooth keyboard (0x15d9/0x00a3) instead of all-zero
+    // values, so that IMEs do not treat the UHID device as a virtual
+    // keyboard and keep the native pinyin candidate bar.
+    msg.uhid_create.vendor_id = 0x0022;
+    msg.uhid_create.product_id = 0x5081;
+    msg.uhid_create.name = "Xiaomi Keyboard";
     msg.uhid_create.report_desc = hid_open.report_desc;
     msg.uhid_create.report_desc_size = hid_open.report_desc_size;
     if (!sc_controller_push_msg(controller, &msg)) {

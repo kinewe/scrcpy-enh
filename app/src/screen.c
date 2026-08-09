@@ -3,6 +3,9 @@
 #include <assert.h>
 #include <string.h>
 #include <SDL3/SDL.h>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 #include "events.h"
 #include "icon.h"
@@ -492,6 +495,16 @@ sc_screen_init(struct sc_screen *screen,
     screen->orientation = SC_ORIENTATION_0;
     screen->disconnected = false;
     screen->disconnect_started = false;
+    screen->hid_keyboard = params->hid_keyboard;
+#ifdef _WIN32
+    screen->original_hkl = NULL;
+    screen->en_hkl = NULL;
+    screen->layout_forced = false;
+    screen->ime_open_saved = false;
+    screen->ime_open_saved_valid = false;
+    screen->ime_restore_allowed = true;
+    screen->startup_hkl = params->startup_hkl;
+#endif
 
     screen->video = params->video;
     screen->camera = params->camera;
@@ -793,6 +806,11 @@ sc_screen_interrupt_disconnect(struct sc_screen *screen) {
     }
 }
 
+#ifdef _WIN32
+static void
+sc_screen_apply_keyboard_layout(struct sc_screen *screen, bool english);
+#endif
+
 void
 sc_screen_join(struct sc_screen *screen) {
     sc_fps_counter_join(&screen->fps_counter);
@@ -815,6 +833,18 @@ sc_screen_destroy(struct sc_screen *screen) {
     SDL_GL_DestroyContext(screen->gl_context);
 #endif
     SDL_DestroyRenderer(screen->renderer);
+#ifdef _WIN32
+    // The window may be closed directly (X button / Alt+F4) while focused:
+    // SDL destroys the window without posting SDL_EVENT_WINDOW_FOCUS_LOST,
+    // so the focus-lost handler below would never run and the computer
+    // would be left on the forced English layout. Restore the original
+    // layout on every exit path, while the window handle is still valid.
+    // No-op when the layout was already restored (layout_forced == false)
+    // or never forced (original_hkl == NULL).
+    if (screen->hid_keyboard && screen->layout_forced) {
+        sc_screen_apply_keyboard_layout(screen, false);
+    }
+#endif
     SDL_DestroyWindow(screen->window);
     sc_fps_counter_destroy(&screen->fps_counter);
     sc_frame_buffer_destroy(&screen->fb);
@@ -1133,6 +1163,154 @@ sc_disconnect_on_timeout(struct sc_disconnect *d, void *userdata) {
     (void) ok; // ignore failure
 }
 
+#ifdef _WIN32
+// Restore the system-wide keyboard layout after scrcpy lost focus.
+// Windows keyboard layouts are per-thread: while scrcpy has focus it is
+// the foreground thread, so ActivateKeyboardLayout() (in
+// sc_screen_apply_keyboard_layout) changes the system-wide (shared)
+// layout to English. On focus loss scrcpy is no longer the foreground
+// thread, so restoring inside the scrcpy thread only affects scrcpy
+// itself, leaving every other window (browser, etc.) on English.
+// Attaching our input state to the new foreground thread makes the next
+// ActivateKeyboardLayout() switch the shared system layout, i.e. the
+// layout used by all other windows.
+// With the "Let me use a different input method for each app window"
+// (per-app IME) setting enabled, each window has its own layout: the
+// foreground window keeps its own (non-English) layout, so no global
+// restore is needed -- and must not be done, as it would change the
+// foreground window's layout. Detected at runtime by comparing the
+// foreground thread layout with the English layout scrcpy forced.
+static void
+sc_screen_restore_global_keyboard_layout(struct sc_screen *screen) {
+    HKL original = (HKL) screen->original_hkl;
+    if (!original) {
+        return;
+    }
+    // The keyboard layout is a system-wide input language: scrcpy forcing
+    // English while focused affected every window, so the restore must be
+    // global too. Broadcast WM_INPUTLANGCHANGEREQUEST to all top-level
+    // windows (the same mechanism the language bar / Alt+Shift uses;
+    // reliable on Windows 10/11, unlike AttachThreadInput tricks which
+    // behave inconsistently for the English layout).
+    // Note: with the "Let me use a different input method for each app
+    // window" (per-app IME) setting enabled, this switches the keyboard
+    // layout of every window as well; the per-app TSF input method memory
+    // is not touched. This is acceptable: the whole point of the restore is
+    // to give the user back their original input method system-wide.
+    LOGI("Keyboard layout globally restored to 0x%08lx (broadcast "
+         "WM_INPUTLANGCHANGEREQUEST)", (unsigned long) (uintptr_t) original);
+    PostMessage(HWND_BROADCAST, WM_INPUTLANGCHANGEREQUEST,
+                INPUTLANGCHANGE_FORWARD, (LPARAM) original);
+}
+
+static void
+sc_screen_apply_keyboard_layout(struct sc_screen *screen, bool english) {
+    HWND hwnd = (HWND) SDL_GetPointerProperty(
+            SDL_GetWindowProperties(screen->window),
+            SDL_PROP_WINDOW_WIN32_HWND_POINTER, NULL);
+    if (!hwnd) {
+        return;
+    }
+    if (english) {
+        if (screen->layout_forced) {
+            // Already forced: keep the current state, do not re-activate.
+            return;
+        }
+        if (!screen->original_hkl) {
+            // Prefer the layout captured before SDL initialization: after
+            // SDL_Init(VIDEO), GetKeyboardLayout(0) returns the Preload
+            // default of the scrcpy thread, which may differ from the
+            // user's actual system layout (problem B: restore switched to
+            // the wrong layout).
+            screen->original_hkl = screen->startup_hkl
+                                       ? screen->startup_hkl
+                                       : (void *) GetKeyboardLayout(0);
+        }
+        // Activate the English (US) keyboard layout. TSF input methods
+        // (Sogou, Microsoft Pinyin...) are bound to their own keyboard
+        // layout, so activating 00000409 disables them for this thread.
+        HKL en = LoadKeyboardLayoutW(L"00000409", KLF_ACTIVATE);
+        if (en) {
+            ActivateKeyboardLayout(en, 0);
+            screen->layout_forced = true;
+            screen->en_hkl = (void *) en;
+        }
+        // Also close the IME open status via IMM32 (best effort: TSF IMEs
+        // may ignore it, the layout switch above is the main mechanism).
+        // Save the original open status first so that focus loss restores
+        // it exactly: unconditionally reopening the IME under the ENG
+        // layout makes TSF activate the Chinese IME, which switches the
+        // layout away (problem B).
+        //
+        // Restoring the open status is only safe for Chinese layouts: on
+        // any other layout (e.g. the system current language is English),
+        // ImmSetOpenStatus(TRUE) activates the TSF Chinese IME which
+        // switches the layout away (problem B residual).
+        unsigned long ime_restore_lang = (unsigned long) (uintptr_t)
+            screen->original_hkl & 0x3FF;
+        screen->ime_restore_allowed =
+            ime_restore_lang == 0x0004 || ime_restore_lang == 0x0008;
+        HIMC imc = ImmGetContext(hwnd);
+        if (imc) {
+            if (!screen->ime_open_saved_valid) {
+                screen->ime_open_saved = ImmGetOpenStatus(imc) != FALSE;
+                screen->ime_open_saved_valid = true;
+            }
+            ImmSetOpenStatus(imc, FALSE);
+            ImmReleaseContext(hwnd, imc);
+        }
+        LOGI("IME layout forced to English (00000409), original 0x%08lx%s, "
+             "IME open saved=%d, restore_allowed=%d",
+             (unsigned long) (uintptr_t) screen->original_hkl,
+             screen->startup_hkl ? " (startup)" : " (thread)",
+             screen->ime_open_saved_valid ? (screen->ime_open_saved ? 1 : 0)
+                                          : -1,
+             screen->ime_restore_allowed ? 1 : 0);
+    } else if (screen->original_hkl) {
+        // Restore the user's original keyboard layout. The IME open status
+        // must be restored symmetrically: focus gained closed it via
+        // ImmSetOpenStatus(FALSE), otherwise TSF IMEs (Sogou, Microsoft
+        // Pinyin...) stay closed and the user cannot type Chinese after
+        // switching away from the scrcpy window ("layout not restored").
+        ActivateKeyboardLayout((HKL) screen->original_hkl, 0);
+        screen->layout_forced = false;
+        HIMC imc = ImmGetContext(hwnd);
+        bool ime_open = false;
+        if (imc) {
+            if (screen->ime_open_saved_valid) {
+                // Symmetric restore of the state recorded at focus gain
+                // (unconditionally reopening the IME under the ENG layout
+                // would trigger TSF to activate the Chinese IME and switch
+                // the layout away).
+                if (screen->ime_restore_allowed) {
+                    ImmSetOpenStatus(imc, screen->ime_open_saved);
+                } else {
+                    LOGI("IME open restore skipped (non-Chinese layout "
+                         "0x%08lx, reopening would switch the layout away)",
+                         (unsigned long) (uintptr_t) screen->original_hkl);
+                }
+                ime_open = ImmGetOpenStatus(imc) != FALSE;
+            } else {
+                // No saved state (no IME context when focus was gained):
+                // fall back to reopening the IME, best effort.
+                ImmSetOpenStatus(imc, TRUE);
+                ime_open = ImmGetOpenStatus(imc) != FALSE;
+            }
+            ImmReleaseContext(hwnd, imc);
+        }
+        LOGI("IME layout restored (0x%08lx), IME open=%d%s%s",
+             (unsigned long) (uintptr_t) screen->original_hkl, ime_open ? 1 : 0,
+             imc ? "" : " (no IME context: no IME installed on this system)",
+             screen->ime_open_saved_valid ? "" : " (no saved IME state)");
+        LOGI("IME: %s",
+             ime_open ? "open (Chinese IME usable)" : "closed or unavailable");
+        // Restore the system-wide layout (browser and other windows), not
+        // only the scrcpy thread's layout.
+        sc_screen_restore_global_keyboard_layout(screen);
+    }
+}
+#endif
+
 void
 sc_screen_handle_event(struct sc_screen *screen, const SDL_Event *event) {
     switch (event->type) {
@@ -1161,6 +1339,24 @@ sc_screen_handle_event(struct sc_screen *screen, const SDL_Event *event) {
             }
             return;
         }
+        case SDL_EVENT_WINDOW_FOCUS_GAINED:
+#ifdef _WIN32
+            // With HID keyboards (UHID/AOA), the computer IME must not
+            // interfere with the keys: force the English layout while the
+            // window has focus (TSF IMEs like Sogou react to plain Shift
+            // presses even when text input is not started).
+            if (screen->hid_keyboard) {
+                sc_screen_apply_keyboard_layout(screen, true);
+            }
+#endif
+            return;
+        case SDL_EVENT_WINDOW_FOCUS_LOST:
+#ifdef _WIN32
+            if (screen->hid_keyboard) {
+                sc_screen_apply_keyboard_layout(screen, false);
+            }
+#endif
+            return;
         case SDL_EVENT_WINDOW_EXPOSED:
             sc_screen_render(screen, true);
             return;

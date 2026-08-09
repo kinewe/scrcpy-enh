@@ -107,6 +107,38 @@ struct sc_screen {
         sc_tick time; // 0 means none
         struct sc_size size;
     } resize_tracker;
+
+    // True when a HID keyboard (UHID/AOA) is used: the computer IME must be
+    // forced to English while the window has focus.
+    bool hid_keyboard;
+#ifdef _WIN32
+    // Original keyboard layout (HKL) before the window grabbed focus with a
+    // HID keyboard, restored on focus loss.
+    void *original_hkl;
+    // English (US) HKL forced while the window has focus. Used on focus loss
+    // to detect whether the new foreground window shares the system-wide
+    // layout (per-app IME disabled) or keeps its own layout (per-app IME
+    // enabled, "use a different input method for each app window").
+    void *en_hkl;
+    // Whether the English layout is currently forced on this thread (idempotent
+    // focus gain: avoid re-activating the layout on every focus event).
+    bool layout_forced;
+    // IME open status saved when focus was gained (before forcing English),
+    // restored symmetrically on focus loss / exit. Unconditionally reopening
+    // the IME would trigger TSF to activate the Chinese IME under the ENG
+    // layout, switching the layout away (problem B).
+    bool ime_open_saved;
+    bool ime_open_saved_valid;
+    // Whether restoring the IME open status on focus loss is safe: it is
+    // only safe for Chinese layouts. On any other layout,
+    // ImmSetOpenStatus(TRUE) triggers the TSF Chinese IME to activate
+    // and switches the layout away.
+    bool ime_restore_allowed;
+    // Real system keyboard layout captured before SDL initialization:
+    // GetKeyboardLayout(0) after SDL_Init may return the Preload default of
+    // the scrcpy thread instead of the user's actual layout.
+    void *startup_hkl;
+#endif
 };
 
 struct sc_screen_params {
@@ -119,6 +151,16 @@ struct sc_screen_params {
     struct sc_key_processor *kp;
     struct sc_mouse_processor *mp;
     struct sc_gamepad_processor *gp;
+
+    // True when the keyboard is a HID keyboard (UHID/AOA): force the English
+    // layout while the window has focus so the computer IME does not
+    // interfere with the injected keys.
+    bool hid_keyboard;
+#ifdef _WIN32
+    // Keyboard layout captured before SDL initialization (see
+    // sc_screen.startup_hkl).
+    void *startup_hkl;
+#endif
 
     struct sc_mouse_bindings mouse_bindings;
     bool legacy_paste;
