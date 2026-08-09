@@ -129,6 +129,11 @@ struct sc_screen {
     // layout, switching the layout away (problem B).
     bool ime_open_saved;
     bool ime_open_saved_valid;
+    // Whether restoring the IME open status on focus loss is safe: it is
+    // only safe for Chinese layouts. On any other layout,
+    // ImmSetOpenStatus(TRUE) triggers the TSF Chinese IME to activate
+    // and switches the layout away.
+    bool ime_restore_allowed;
     // Real system keyboard layout captured before SDL initialization:
     // GetKeyboardLayout(0) after SDL_Init may return the Preload default of
     // the scrcpy thread instead of the user's actual layout.

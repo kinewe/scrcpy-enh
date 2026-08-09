@@ -327,12 +327,28 @@ scrcpy(struct scrcpy_options *options) {
     struct scrcpy *s = &scrcpy;
 
 #ifdef _WIN32
-    // Record the real system keyboard layout before SDL initializes: after
-    // SDL_Init(VIDEO), GetKeyboardLayout(0) on the scrcpy thread returns the
-    // Preload default of the thread, which may differ from the user's actual
-    // layout. This value is passed to the screen and used as the original
-    // layout to restore on focus loss / exit.
-    HKL startup_hkl = GetKeyboardLayout(0);
+    // Record the real system keyboard layout before SDL initializes. The
+    // thread layout (GetKeyboardLayout(0)) always returns the Preload
+    // default (e.g. Chinese 00000804), which is NOT the user's current
+    // input language: on a system whose current language is English, a new
+    // thread still starts with the Preload default, so restoring it on
+    // focus loss would switch the layout away (problem B residual). The
+    // foreground window thread layout is the system-wide current input
+    // language; the scrcpy window does not exist yet at this point, so the
+    // foreground window is the user's active window.
+    HKL startup_hkl = NULL;
+    HWND fg = GetForegroundWindow();
+    DWORD fg_tid = fg ? GetWindowThreadProcessId(fg, NULL) : 0;
+    if (fg_tid) {
+        startup_hkl = GetKeyboardLayout(fg_tid);
+    }
+    if (!startup_hkl) {
+        // Fallback: thread layout (Preload default)
+        startup_hkl = GetKeyboardLayout(0);
+    }
+    LOGI("Startup HKL from foreground thread: 0x%08lx%s",
+         (unsigned long) (uintptr_t) startup_hkl,
+         fg_tid ? "" : " (fallback: no foreground window)");
 #else
     HKL startup_hkl = NULL; // unused on non-Windows
 #endif

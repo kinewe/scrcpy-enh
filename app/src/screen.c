@@ -502,6 +502,7 @@ sc_screen_init(struct sc_screen *screen,
     screen->layout_forced = false;
     screen->ime_open_saved = false;
     screen->ime_open_saved_valid = false;
+    screen->ime_restore_allowed = true;
     screen->startup_hkl = params->startup_hkl;
 #endif
 
@@ -1240,6 +1241,15 @@ sc_screen_apply_keyboard_layout(struct sc_screen *screen, bool english) {
         // it exactly: unconditionally reopening the IME under the ENG
         // layout makes TSF activate the Chinese IME, which switches the
         // layout away (problem B).
+        //
+        // Restoring the open status is only safe for Chinese layouts: on
+        // any other layout (e.g. the system current language is English),
+        // ImmSetOpenStatus(TRUE) activates the TSF Chinese IME which
+        // switches the layout away (problem B residual).
+        unsigned long ime_restore_lang = (unsigned long) (uintptr_t)
+            screen->original_hkl & 0x3FF;
+        screen->ime_restore_allowed =
+            ime_restore_lang == 0x0004 || ime_restore_lang == 0x0008;
         HIMC imc = ImmGetContext(hwnd);
         if (imc) {
             if (!screen->ime_open_saved_valid) {
@@ -1250,11 +1260,12 @@ sc_screen_apply_keyboard_layout(struct sc_screen *screen, bool english) {
             ImmReleaseContext(hwnd, imc);
         }
         LOGI("IME layout forced to English (00000409), original 0x%08lx%s, "
-             "IME open saved=%d",
+             "IME open saved=%d, restore_allowed=%d",
              (unsigned long) (uintptr_t) screen->original_hkl,
              screen->startup_hkl ? " (startup)" : " (thread)",
              screen->ime_open_saved_valid ? (screen->ime_open_saved ? 1 : 0)
-                                          : -1);
+                                          : -1,
+             screen->ime_restore_allowed ? 1 : 0);
     } else if (screen->original_hkl) {
         // Restore the user's original keyboard layout. The IME open status
         // must be restored symmetrically: focus gained closed it via
@@ -1271,7 +1282,13 @@ sc_screen_apply_keyboard_layout(struct sc_screen *screen, bool english) {
                 // (unconditionally reopening the IME under the ENG layout
                 // would trigger TSF to activate the Chinese IME and switch
                 // the layout away).
-                ImmSetOpenStatus(imc, screen->ime_open_saved);
+                if (screen->ime_restore_allowed) {
+                    ImmSetOpenStatus(imc, screen->ime_open_saved);
+                } else {
+                    LOGI("IME open restore skipped (non-Chinese layout "
+                         "0x%08lx, reopening would switch the layout away)",
+                         (unsigned long) (uintptr_t) screen->original_hkl);
+                }
                 ime_open = ImmGetOpenStatus(imc) != FALSE;
             } else {
                 // No saved state (no IME context when focus was gained):
