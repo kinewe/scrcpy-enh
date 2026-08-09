@@ -2,51 +2,55 @@
 setlocal enabledelayedexpansion
 rem 清理上次 watcher 切换标记（防残留误判"插线切换"）
 del /q "%TEMP%\scrcpy_watch_switch.flag" >nul 2>&1
-title 投屏高清版 - 有线高清 / 无线低延迟
+cd /d "%~dp0"
 
 rem ============================================
-rem   投屏高清版：有线高规格串流 / 无线低延迟串流
-rem   检测到 USB 走有线模式；无 USB 自动走无线
+rem   scrcpy 4.1 自定义构建（图片剪贴板版）启动脚本
+rem   用法: 双击运行，或 启动.bat [scrcpy参数...]
+rem   快捷键: MOD+v=同步剪贴板并粘贴; MOD+Shift+c=只同步剪贴板不粘贴（图片/文本）
+rem   剪贴板自动同步：电脑复制（文本/图片）自动推送到手机剪贴板，无需按键，
+rem   手机长按即可粘贴（--no-clipboard-sync 可关闭）
+rem   投屏循环：关闭窗口（退出码 0）正常退出；拔线/异常断开（非 0）自动重新检测并重连，
+rem   USB 优先，无 USB 则自动切换无线（adb devices 中 IP:端口 条目）
+rem   无线投屏期间开启 USB 插线监测，检测到 USB 插入自动切回有线高清投屏
+rem   串流参数与 手机投屏.bat 保持同步（有线高规格 / 无线低延迟）
 rem ============================================
+
+rem 使用本目录内的 server（自定义构建必须，不依赖环境变量）
+set "SCRCPY_SERVER_PATH=%~dp0scrcpy-server"
+
+rem 优先使用本目录内的 adb.exe，否则用 PATH 中的 adb
+set "ADB=adb"
+if exist "%~dp0adb.exe" set "ADB=%~dp0adb.exe"
 
 set "SCRIPT_DIR=%~dp0"
+rem 无线地址记忆：优先本目录 config.txt；缺失时回退读取共享 config.txt
+rem （dist 上两级 = scrcpy\config.txt，与 手机投屏.bat 共用同一份记忆），
+rem 保存时两个文件同步写入，保证两个脚本的记忆始终一致
 set "CONFIG_FILE=%SCRIPT_DIR%config.txt"
+set "FALLBACK_CONFIG=%SCRIPT_DIR%..\..\config.txt"
+
 rem ----- 串流参数：有线 USB 带宽充足用高规格；无线带宽有限保持低延迟 -----
 set "USB_ARGS=--keyboard=uhid --video-codec=h264 --video-bit-rate=50M --max-size 2560 --max-fps 120 --video-codec-options="max-b-frames:int=0,bitrate-mode:int=1,i-frame-interval:int=1" --render-driver=direct3d --video-buffer=0"
 set "WIFI_ARGS=--keyboard=uhid --video-codec=h264 --video-bit-rate=15M --max-size 1920 --max-fps 60"
 
-rem ===== 自动切换投屏模式参数 =====
-set "WATCH_TAG=YINMO_USB_WATCH"
+rem ===== 自动切换投屏模式参数（与 手机投屏.bat 同步）=====
+rem 注：WATCH_TAG 独立命名，避免与 手机投屏.bat 的后台监测进程互相误杀
+set "WATCH_TAG=YINMO_LAUNCH_USB_WATCH"
 set "WATCH_INTERVAL=2"
 set "AUTO_RETRY_SEC=2"
 
-rem ===== 定位 scrcpy.exe 完整路径（避免调用到同名脚本）=====
-set "SCRCPY_EXE="
-for /f "delims=" %%i in ('where scrcpy.exe 2^>nul') do (
-    if not defined SCRCPY_EXE set "SCRCPY_EXE=%%i"
-)
-if not defined SCRCPY_EXE (
-    echo [失败] 未找到 scrcpy.exe，请确认已安装并加入 PATH
-    pause
-    exit /b 1
-)
-
-echo ============================================
-echo    投屏高清版 - 有线高清 / 无线低延迟
-echo ============================================
-echo.
-
 rem ============================================
-rem   主流程
+rem   主流程：重置 adb -> 检测 USB -> 有线/无线
 rem ============================================
 :main
 
 rem ----- 1. 重置 adb 服务，清理僵死状态 -----
 echo [1] 重置 adb 服务...
-adb kill-server >nul 2>&1
-adb start-server >nul 2>&1
+"!ADB!" kill-server >nul 2>&1
+"!ADB!" start-server >nul 2>&1
 if errorlevel 1 (
-    echo [失败] adb 启动失败，请确认 adb 已安装并加入 PATH
+    echo [失败] adb 启动失败，请确认 adb 可用
     pause
     exit /b 1
 )
@@ -54,7 +58,7 @@ if errorlevel 1 (
 rem ----- 2. 检测 USB 设备（serial 不含冒号且不含 _adb-tls 即为 USB）-----
 echo [2] 检测 USB 设备...
 set "USB_DEV="
-for /f "skip=1 tokens=1,2" %%a in ('adb devices 2^>nul') do (
+for /f "skip=1 tokens=1,2" %%a in ('"!ADB!" devices 2^>nul') do (
     if "%%b"=="device" (
         rem 无线设备 serial 为 IP:端口，含冒号，排除
         echo %%a | findstr /i ":" >nul 2>&1
@@ -66,6 +70,20 @@ for /f "skip=1 tokens=1,2" %%a in ('adb devices 2^>nul') do (
                 if not defined USB_DEV set "USB_DEV=%%a"
             )
         )
+    ) else if "%%b"=="unauthorized" (
+        rem 插线但未授权（手机弹窗未点"允许"）：不参与投屏选择，但记录以便提示
+        echo %%a | findstr /i ":" >nul 2>&1
+        if errorlevel 1 (
+            echo %%a | findstr /i "_adb-tls" >nul 2>&1
+            if errorlevel 1 if not defined USB_HINT set "USB_HINT=%%a"
+        )
+    ) else if "%%b"=="offline" (
+        rem 插线但离线（驱动/连接问题）：同样记录提示
+        echo %%a | findstr /i ":" >nul 2>&1
+        if errorlevel 1 (
+            echo %%a | findstr /i "_adb-tls" >nul 2>&1
+            if errorlevel 1 if not defined USB_HINT set "USB_HINT=%%a"
+        )
     )
 )
 
@@ -76,40 +94,48 @@ if defined USB_DEV (
     goto :do_cast
 )
 
+rem 插线但未授权/未就绪：提示用户操作手机（不阻止无线投屏继续）
+if defined USB_HINT (
+    echo [提示] 检测到 USB 设备（!USB_HINT!）但未授权或未就绪，
+    echo       请解锁手机并点击"允许 USB 调试"，插线监测将自动切换有线投屏
+    echo.
+)
 echo [提示] 未检测到 USB 设备，进入无线模式
 echo.
-
 goto :wireless_mode
 
 rem ============================================
-rem   无线模式
+rem   无线模式：config.txt 持久化 + 扫描 + 配对
 rem ============================================
 :wireless_mode
 echo [3] 无线模式：尝试连接上次保存的地址...
 set "WIRE_DEV="
 set "LAST_DEVICE="
 
-rem ----- 3a. 读取 config.txt 并尝试连接 -----
-if exist "%CONFIG_FILE%" (
-    set /p LAST_DEVICE=<"%CONFIG_FILE%"
+rem ----- 3a. 读取无线地址记忆（本目录 config.txt 优先，缺失则回退上级共享 config.txt）并尝试连接 -----
+set "CONFIG_SRC="
+if exist "%CONFIG_FILE%" set "CONFIG_SRC=%CONFIG_FILE%"
+if not defined CONFIG_SRC if exist "%FALLBACK_CONFIG%" set "CONFIG_SRC=%FALLBACK_CONFIG%"
+if defined CONFIG_SRC (
+    set /p LAST_DEVICE=<"!CONFIG_SRC!"
     if not "!LAST_DEVICE!"=="" (
         echo [提示] 尝试连接：!LAST_DEVICE!
-        for /f "delims=" %%r in ('adb connect !LAST_DEVICE! 2^>^&1') do echo   结果：%%r
+        for /f "delims=" %%r in ('"!ADB!" connect !LAST_DEVICE! 2^>^&1') do echo   结果：%%r
         rem 验证连接成功（adb devices 中有该设备且状态为 device）
-        for /f "skip=1 tokens=1,2" %%a in ('adb devices 2^>nul') do (
+        for /f "skip=1 tokens=1,2" %%a in ('"!ADB!" devices 2^>nul') do (
             if "%%a"=="!LAST_DEVICE!" if "%%b"=="device" set "WIRE_DEV=!LAST_DEVICE!"
         )
         if defined WIRE_DEV echo [OK] 连接成功：!WIRE_DEV!
     )
 ) else (
-    echo [提示] 未找到 config.txt
+    echo [提示] 未找到 config.txt（本目录与上级目录均无）
 )
 
 rem ----- 3b. 若 config 地址无效，扫描已有无线设备（IP 条目优先 + 去重）-----
 if not defined WIRE_DEV (
     echo [3] 扫描已有无线设备（IP 条目优先，自动去重）...
     set "IP_COUNT=0"
-    for /f "skip=1 tokens=1,2" %%a in ('adb devices 2^>nul') do (
+    for /f "skip=1 tokens=1,2" %%a in ('"!ADB!" devices 2^>nul') do (
         if "%%b"=="device" (
             set "SERIAL=%%a"
             rem 只收 IP:端口 格式条目
@@ -146,12 +172,19 @@ if not defined WIRE_DEV (
 )
 
 set "PICK=!WIRE_DEV!"
-if not "!PICK!"=="!LAST_DEVICE!" (
+rem 保存条件：本目录 config.txt 缺失（首次连接或从上级回退读取后落盘），或地址有变化
+set "NEED_SAVE="
+if not exist "%CONFIG_FILE%" set "NEED_SAVE=1"
+if not "!PICK!"=="!LAST_DEVICE!" set "NEED_SAVE=1"
+if defined NEED_SAVE (
     > "%CONFIG_FILE%" echo !PICK!
+    rem 上级共享 config.txt 存在则同步写入，与 手机投屏.bat 的记忆保持一致
+    if exist "%FALLBACK_CONFIG%" (
+        > "%FALLBACK_CONFIG%" echo !PICK!
+    )
     echo [OK] 已保存无线地址到 config.txt：!PICK!
 )
 goto :do_cast
-
 
 rem ============================================
 rem   投屏循环（自动切换投屏模式）
@@ -159,6 +192,14 @@ rem   scrcpy 退出后自动重新检测设备：
 rem   拔线 -> 自动切无线；插线 -> 自动切有线
 rem ============================================
 :do_cast
+rem 首次投屏推送当前电脑剪贴板（启动推送）；模式切换/重连（再次进入 do_cast）
+rem 时传 --no-clipboard-push-on-start，避免手机剪贴板被相同内容反复占满
+if not defined FIRST_CAST_DONE (
+    set "FIRST_CAST_DONE=1"
+    set "CLIP_START_PUSH="
+) else (
+    set "CLIP_START_PUSH=--no-clipboard-push-on-start"
+)
 echo.
 echo ===== 开始投屏：!PICK! =====
 echo   提示：关闭窗口即断开；Alt+f 切换全屏；Ctrl+c 退出
@@ -173,13 +214,13 @@ if not errorlevel 1 (
 ) else (
     rem 有线 USB 连接：带宽充足，启用高规格串流
     set "CAST_ARGS=!USB_ARGS!"
-    echo [高清] 有线模式：USB 带宽充足，已启用高规格串流（h264/50M/2560/120fps/低延迟优化，鼠标不捕获，剪贴板自动同步（电脑复制即达手机））
+    echo [高清] 有线模式：USB 带宽充足，已启用高规格串流（h264/50M/2560/120fps/低延迟优化，剪贴板自动同步（电脑复制即达手机））
 )
 rem ----- 保存当前代码页（scrcpy 可能改成 UTF-8），退出后恢复避免中文乱码 -----
 for /f "tokens=2 delims=:" %%c in ('chcp') do set "OLD_CP=%%c"
 set "OLD_CP=!OLD_CP: =!"
 if not defined OLD_CP set "OLD_CP=936"
-"%SCRCPY_EXE%" --serial !PICK! !CAST_ARGS!
+"%~dp0scrcpy.exe" --serial !PICK! !CAST_ARGS! !CLIP_START_PUSH! %*
 set "CAST_RC=!ERRORLEVEL!"
 chcp !OLD_CP! >nul 2>&1
 call :stop_usb_watch
@@ -193,7 +234,6 @@ if "!CAST_RC!"=="0" (
         goto :main
     )
     echo [提示] 已检测到窗口关闭（退出码 0），投屏已结束，退出投屏循环
-    call :stop_usb_watch
     timeout /t 1 /nobreak >nul
     exit /b 0
 )
@@ -204,16 +244,28 @@ rem 直接退出投屏循环，避免无限自动重连导致"关窗后 bat 不退出"
 echo !PICK! | findstr /i ":" >nul 2>&1
 if not errorlevel 1 (
     set "STILL_THERE="
-    for /f "skip=1 tokens=1,2" %%a in ('adb devices 2^>nul') do (
+    set "USB_BACK="
+    for /f "skip=1 tokens=1,2" %%a in ('"!ADB!" devices 2^>nul') do (
         if "%%a"=="!PICK!" if "%%b"=="device" set "STILL_THERE=1"
+        rem 插线切换场景：无线可能暂时离线，若 USB 已接入则继续重连走有线
+        if not defined USB_BACK if not "%%b"=="" (
+            echo %%a | findstr /i ":" >nul 2>&1
+            if errorlevel 1 (
+                echo %%a | findstr /i "_adb-tls" >nul 2>&1
+                if errorlevel 1 set "USB_BACK=%%a"
+            )
+        )
     )
     if not defined STILL_THERE (
-        echo [提示] 无线设备 !PICK! 已离线，投屏连接已断开，退出投屏循环
-        call :stop_usb_watch
-        timeout /t 1 /nobreak >nul
-        exit /b 0
+        if not defined USB_BACK (
+            echo [提示] 无线设备 !PICK! 已离线，投屏连接已断开，退出投屏循环
+            timeout /t 1 /nobreak >nul
+            exit /b 0
+        )
+        echo [提示] 无线设备已离线，但检测到 USB 设备（!USB_BACK!），继续重连以切换有线投屏
+    ) else (
+        echo [提示] 无线设备 !PICK! 仍在线，尝试自动重连...
     )
-    echo [提示] 无线设备 !PICK! 仍在线，尝试自动重连...
 )
 echo.
 rem 自动重连：不按键则等待后自动重新检测并投屏
@@ -239,7 +291,7 @@ echo [学习] 有线模式：检测手机 WiFi IP...
 set "WIFI_IP="
 rem 主方案：ip -4 addr show 中 wlan 接口的 inet 地址（先剥离 < > 避免重定向解析，
 rem 排除 127.0.0.1；tun*/rmnet* 接口不含 wlan 天然排除）
-for /f "tokens=*" %%i in ('adb -s !USB_DEV! shell ip -4 addr show 2^>nul') do (
+for /f "tokens=*" %%i in ('"!ADB!" -s !USB_DEV! shell ip -4 addr show 2^>nul') do (
     set "LINE=%%i"
     set "LINE=!LINE:<=!"
     set "LINE=!LINE:>=!"
@@ -256,7 +308,7 @@ for /f "tokens=*" %%i in ('adb -s !USB_DEV! shell ip -4 addr show 2^>nul') do (
 )
 rem 备选方案：ip route 中 wlan 路由的 src 源 IP
 if not defined WIFI_IP (
-    for /f "tokens=*" %%i in ('adb -s !USB_DEV! shell ip route 2^>nul') do (
+    for /f "tokens=*" %%i in ('"!ADB!" -s !USB_DEV! shell ip route 2^>nul') do (
         set "LINE=%%i"
         echo !LINE! | findstr /i "wlan" >nul 2>&1
         if not errorlevel 1 (
@@ -293,16 +345,16 @@ if not "!SAVED_IP!"=="!WIFI_IP!:5555" set "NEED_TCPIP=1"
 rem 即使 IP 未变：设备重启后 adbd 的无线调试端口会丢失（5555 不再监听），
 rem 必须检查端口实际状态，未开启则重新执行 tcpip；端口已开才跳过（避免无谓重启 adbd）
 set "TCP_PORT="
-for /f "delims=" %%p in ('adb -s !USB_DEV! shell getprop service.adb.tcp.port 2^>nul') do set "TCP_PORT=%%p"
+for /f "delims=" %%p in ('"!ADB!" -s !USB_DEV! shell getprop service.adb.tcp.port 2^>nul') do set "TCP_PORT=%%p"
 if not "!TCP_PORT:~0,4!"=="5555" set "NEED_TCPIP=1"
 if defined NEED_TCPIP (
     echo [学习] 开启无线调试端口（adb tcpip 5555）...
-    adb -s !USB_DEV! tcpip 5555 >nul 2>&1
+    "!ADB!" -s !USB_DEV! tcpip 5555 >nul 2>&1
     rem tcpip 会重启手机端 adbd（USB 短暂断开约 5-6 秒），等待设备恢复再投屏
     echo [学习] 等待设备重新上线（最多 15 秒）...
     for /l %%w in (1,1,15) do (
         set "BACK="
-        for /f "skip=1 tokens=1,2" %%a in ('adb devices 2^>nul') do (
+        for /f "skip=1 tokens=1,2" %%a in ('"!ADB!" devices 2^>nul') do (
             if "%%a"=="!USB_DEV!" if "%%b"=="device" set "BACK=1"
         )
         if defined BACK (
@@ -356,7 +408,7 @@ set /p PAIR_CODE=请输入配对码（6位数字）：
 
 echo.
 echo [正在配对...]
-adb pair %PAIR_IP% %PAIR_CODE%
+"!ADB!" pair !PAIR_IP! !PAIR_CODE!
 if errorlevel 1 (
     echo [失败] 配对失败，请检查配对码和 IP 是否正确
     pause
@@ -372,7 +424,7 @@ echo [正在查找连接端口（mDNS）...]
 set "MDNS_PORT="
 for /l %%r in (1,1,5) do (
     rem mdns 输出格式: 服务名[tab]类型[tab]IP:端口
-    for /f "tokens=1,2,3" %%a in ('adb mdns services 2^>nul') do (
+    for /f "tokens=1,2,3" %%a in ('"!ADB!" mdns services 2^>nul') do (
         if "%%b"=="_adb-tls-connect._tcp" (
             for /f "tokens=1 delims=:" %%x in ("%%c") do (
                 if "%%x"=="!PAIR_HOST!" set "MDNS_PORT=%%c"
@@ -394,7 +446,7 @@ if defined MDNS_PORT (
 )
 
 echo [正在连接...]
-for /f "delims=" %%r in ('adb connect !CONN_IP! 2^>^&1') do set "CONN_RESULT=%%r"
+for /f "delims=" %%r in ('"!ADB!" connect !CONN_IP! 2^>^&1') do set "CONN_RESULT=%%r"
 echo !CONN_RESULT!
 echo !CONN_RESULT! | findstr /i "connected" >nul 2>&1
 if errorlevel 1 (
@@ -404,13 +456,15 @@ if errorlevel 1 (
 )
 
 > "%CONFIG_FILE%" echo !CONN_IP!
+if exist "%FALLBACK_CONFIG%" (
+    > "%FALLBACK_CONFIG%" echo !CONN_IP!
+)
 echo [OK] 已保存连接信息到 config.txt
 echo.
 echo [完成] 配对并连接成功！回到主流程开始投屏...
 echo [提示] 如果手机还连着 USB，将走有线投屏；拔掉 USB 则走无线投屏
 echo.
 goto :main
-
 
 rem ============================================
 rem   USB 插线监测（后台 powershell 进程）
@@ -421,7 +475,7 @@ rem   进程自行退出条件：检测到 USB 或 scrcpy 已不存在
 rem ============================================
 :start_usb_watch
 call :stop_usb_watch
-start "!WATCH_TAG!" /b powershell -NoProfile -WindowStyle Hidden -Command "$WATCH_TAG='!WATCH_TAG!';while($true){if(-not(Get-Process scrcpy -ErrorAction SilentlyContinue)){break};$u=adb devices 2>$null|Select-Object -Skip 1|Where-Object{$_ -match '\S+\s+device\s*$' -and $_ -notmatch ':' -and $_ -notmatch '_adb-tls'};if($u){Set-Content -Path "$env:TEMP\scrcpy_watch_switch.flag" -Value 1;$wp=Get-Process scrcpy -ErrorAction SilentlyContinue|Where-Object{$_.MainWindowHandle -ne 0};if($wp){[void]$wp.CloseMainWindow()};$dl=(Get-Date).AddSeconds(5);while((Get-Process scrcpy -ErrorAction SilentlyContinue) -and (Get-Date)-lt $dl){Start-Sleep -Milliseconds 200};Get-Process scrcpy -ErrorAction SilentlyContinue|Stop-Process -Force -ErrorAction SilentlyContinue;break};Start-Sleep -Seconds !WATCH_INTERVAL!}"
+start "!WATCH_TAG!" /b powershell -NoProfile -WindowStyle Hidden -Command "$WATCH_TAG='!WATCH_TAG!';$adb='!ADB!';while($true){if(-not(Get-Process scrcpy -ErrorAction SilentlyContinue)){break};$u=& $adb devices 2>$null|Select-Object -Skip 1|Where-Object{$_ -match '\S+\s+(device|unauthorized|offline)\s*$' -and $_ -notmatch ':' -and $_ -notmatch '_adb-tls' -and $_ -notmatch 'emulator'};if($u){Set-Content -Path "$env:TEMP\scrcpy_watch_switch.flag" -Value 1;$wp=Get-Process scrcpy -ErrorAction SilentlyContinue|Where-Object{$_.MainWindowHandle -ne 0};if($wp){[void]$wp.CloseMainWindow()};$dl=(Get-Date).AddSeconds(5);while((Get-Process scrcpy -ErrorAction SilentlyContinue) -and (Get-Date)-lt $dl){Start-Sleep -Milliseconds 200};Get-Process scrcpy -ErrorAction SilentlyContinue|Stop-Process -Force -ErrorAction SilentlyContinue;break};Start-Sleep -Seconds !WATCH_INTERVAL!}"
 exit /b
 
 rem ============================================
