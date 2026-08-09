@@ -17,8 +17,10 @@
 | 伪装项 | 实现 | 效果 |
 |---|---|---|
 | bus 总线 | `UHID_CREATE2.bus = 0x03`（USB） | 系统不再当作 VIRTUAL 虚拟设备（0x06 会被 ROM 静默禁用；0x05 蓝牙伪装因无蓝牙地址也会被禁） |
-| 设备 ID | `vendor 0x0022 / product 0x5081`（小米焦点笔 ID） | 系统加载厂商键盘映射（`Vendor_0022_Product_5081.kcm`） |
-| 设备名 | `Xiaomi Keyboard` | 输入法识别为物理键盘 |
+| 设备 ID | `vendor 0x0712 / product 0x0412`（定制：洛天依/乐正绫生日） | 仅影响厂商映射匹配（缺失回退 Generic.kcm 标准键位） |
+| 设备名 | `Scrcpy YM_ke Keyboard` | 仅显示用（实测：名字不影响任何判定） |
+
+> **💡 ID 与 name 的真相（实测结论）**：真正起决定性作用的是 **bus=0x03**（决定 Enabled + EXTERNAL class）。**vendor/product ID 与设备名不影响识别与输入法行为**——实测三组 ID（`0022:5081` / `15d9:00a3` / `0000:0000`）及改名测试（`Xiaomi Keyboard` → `test-keyboard-9527`）后，Classes、Enabled、输入法候选栏行为完全一致。ID 仅影响厂商映射文件匹配（系统存在 `Vendor_xxxx_Product_yyyy.kcm` 时加载，缺失回退 `Generic.kcm` 标准键位，字母/数字/符号完全可用）。当前定制 ID `0712:0412`（洛天依 7.12 / 乐正绫 4.12 生日）与定制名 `Scrcpy YM_ke Keyboard`（YinMo_kinewe）即为自定义示例。
 
 **效果**：`dumpsys input` 显示 `Classes: KEYBOARD | ALPHAKEY | EXTERNAL`、`IsExternal: true`——所有输入法（百度/讯飞/Gboard）对它的行为与真实蓝牙键盘**完全一致**（候选栏/软键盘形态由输入法自身决定，与设备无关）。
 
