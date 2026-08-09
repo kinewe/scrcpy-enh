@@ -643,7 +643,7 @@ clipboard_push_hdrop_image(struct sc_input_manager *im, bool paste,
     size_t mimetype_len = strlen(hdrop_mime);
     size_t msg_size = 18 + mimetype_len + hdrop_size;
     if (msg_size > SC_CONTROL_MSG_MAX_SIZE) {
-        LOGW("HDROP image message too large: %zu bytes, dropping", msg_size);
+        LOGW("HDROP image message too large: %u bytes, dropping", (unsigned) msg_size);
         free(hdrop_data);
         return false;
     }
@@ -666,8 +666,8 @@ clipboard_push_hdrop_image(struct sc_input_manager *im, bool paste,
         if (sdl_alt_ok) {
             clipboard_last_pushed_fp_alt = sdl_alt;
         }
-        LOGI("Image clipboard: pushed HDROP file as %s (%zu bytes)",
-             hdrop_mime, hdrop_size);
+        LOGI("Image clipboard: pushed HDROP file as %s (%u bytes)",
+             hdrop_mime, (unsigned) hdrop_size);
         return true;
     }
     free(msg.set_image_clipboard.data);
@@ -730,7 +730,7 @@ sc_input_manager_set_device_image_clipboard(struct sc_input_manager *im, bool pa
             if (strcmp(mime_type, "image/bmp") == 0
                     && size > SC_IMAGE_CLIPBOARD_COMPRESS_THRESHOLD
                     && sc_image_bmp_to_jpeg(img_data, size, &compressed, &size)) {
-                LOGI("Image clipboard: compressed BMP to JPEG (%zu bytes)", size);
+                LOGI("Image clipboard: compressed BMP to JPEG (%u bytes)", (unsigned) size);
                 mime_type = "image/jpeg";
                 data = compressed;
             }
@@ -740,8 +740,8 @@ sc_input_manager_set_device_image_clipboard(struct sc_input_manager *im, bool pa
             // Check if message exceeds max size
             size_t msg_size = 18 + mimetype_len + size;
             if (msg_size > SC_CONTROL_MSG_MAX_SIZE) {
-                LOGW("Image clipboard message too large: %zu bytes, dropping",
-                     msg_size);
+                LOGW("Image clipboard message too large: %u bytes, dropping",
+                     (unsigned) msg_size);
                 free(compressed);
                 SDL_free(img_data);
                 return true;

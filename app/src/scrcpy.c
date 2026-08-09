@@ -764,6 +764,8 @@ aoa_complete:
             .kp = kp,
             .mp = mp,
             .gp = gp,
+            .hid_keyboard = options->keyboard_input_mode
+                == SC_KEYBOARD_INPUT_MODE_UHID,
             .mouse_bindings = options->mouse_bindings,
             .legacy_paste = options->legacy_paste,
             .clipboard_autosync = options->clipboard_autosync,

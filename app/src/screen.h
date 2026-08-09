@@ -107,6 +107,23 @@ struct sc_screen {
         sc_tick time; // 0 means none
         struct sc_size size;
     } resize_tracker;
+
+    // True when a HID keyboard (UHID/AOA) is used: the computer IME must be
+    // forced to English while the window has focus.
+    bool hid_keyboard;
+#ifdef _WIN32
+    // Original keyboard layout (HKL) before the window grabbed focus with a
+    // HID keyboard, restored on focus loss.
+    void *original_hkl;
+    // English (US) HKL forced while the window has focus. Used on focus loss
+    // to detect whether the new foreground window shares the system-wide
+    // layout (per-app IME disabled) or keeps its own layout (per-app IME
+    // enabled, "use a different input method for each app window").
+    void *en_hkl;
+    // Whether the English layout is currently forced on this thread (idempotent
+    // focus gain: avoid re-activating the layout on every focus event).
+    bool layout_forced;
+#endif
 };
 
 struct sc_screen_params {
@@ -119,6 +136,11 @@ struct sc_screen_params {
     struct sc_key_processor *kp;
     struct sc_mouse_processor *mp;
     struct sc_gamepad_processor *gp;
+
+    // True when the keyboard is a HID keyboard (UHID/AOA): force the English
+    // layout while the window has focus so the computer IME does not
+    // interfere with the injected keys.
+    bool hid_keyboard;
 
     struct sc_mouse_bindings mouse_bindings;
     bool legacy_paste;
