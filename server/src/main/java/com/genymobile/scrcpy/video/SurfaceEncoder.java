@@ -42,7 +42,7 @@ public class SurfaceEncoder implements AsyncProcessor {
     // the target for a short window, e.g. during boot animations or scene
     // switches), reduce the bitrate step by step so the stream stays
     // smooth (blurrier but not stuttering). Resolution is never changed.
-    private static final long ABR_WINDOW_NS = 150_000_000L; // 200ms detection window: boot animations and
+    private static final long ABR_WINDOW_NS = 100_000_000L; // 100ms detection window: boot animations and
                                                        // scene-switch spikes are short; at 120fps a 200ms
                                                        // window expects ~24 frames and catches short spikes
                                                        // without being diluted by a longer average.
@@ -51,9 +51,12 @@ public class SurfaceEncoder implements AsyncProcessor {
                                                       // (loading screens / low activity) and ignore.
     private static final float ABR_RATIO_THRESHOLD = 0.80f; // healthy if actual >= 80% of expected
     private static final long ABR_MIN_DOWN_INTERVAL_NS = 500_000_000L; // debounce between downgrades
-    private static final long ABR_UP_DELAY_NS = 3_000_000_000L; // stable for 5s before trying to raise
-    private static final long ABR_MIN_UP_INTERVAL_NS = 2_000_000_000L; // debounce between raises
-    private static final int ABR_MIN_BITRATE = 10_000_000; // floor (15M)
+    private static final long ABR_UP_DELAY_NS = 150_000_000L; // stable for 150ms before trying to raise (fast recovery)
+    private static final long ABR_MIN_UP_INTERVAL_NS = 150_000_000L; // 150ms debounce between raises (fast recovery)
+    // Ceiling release: after this long without overload while capped, the
+    // recovery ceiling is slowly relaxed (x1.1 per window) up to the initial rate.
+    private static final long ABR_CEILING_RELEASE_DELAY_NS = 15_000_000_000L; // 15s (faster ceiling probe)
+    private static final int ABR_MIN_BITRATE = 5_000_000; // floor (5M)
     private static final long ABR_DELAY_TRIGGER_MS = 40; // window avg delay delta (ms) above baseline -> overloaded
     // Kept at 50ms: a 200ms window averages over fewer frames, so the
     // mean is more volatile and the same 50ms threshold is already more
@@ -63,6 +66,12 @@ public class SurfaceEncoder implements AsyncProcessor {
     private static final long ABR_DELAY_RECOVER_MS = 20; // window avg delay delta below this -> healthy
 
     private int currentBitRate;
+    // Recovery ceiling (TCP-like congestion control): the restore phase must
+    // not exceed this rate. Shrunk to 80% of the pre-drop rate on every
+    // overload so the restore converges to a stable bitrate instead of
+    // oscillating drop -> restore -> drop (e.g. 60M overloaded forever).
+    private int abrCeiling;
+    private long abrCeilingStableSinceNs;
     private long abrWindowStartNs;
     private int abrWindowFrames;
     private long abrLastDownNs;
@@ -297,6 +306,8 @@ public class SurfaceEncoder implements AsyncProcessor {
         MediaCodec.BufferInfo bufferInfo = new MediaCodec.BufferInfo();
         // Fresh encoder session: start from the configured bitrate
         currentBitRate = videoBitRate;
+        abrCeiling = videoBitRate;
+        abrCeilingStableSinceNs = 0;
         abrWindowStartNs = 0;
         abrWindowFrames = 0;
         abrLastDownNs = 0;
@@ -320,8 +331,9 @@ public class SurfaceEncoder implements AsyncProcessor {
                         // If this is not a config packet, then it contains a frame
                         firstFrameSent = true;
                         consecutiveErrors = 0;
-                        maybeAdaptBitrate(codec, bufferInfo.presentationTimeUs,
-                                SystemClock.elapsedRealtimeNanos());
+                        long ptsUs = bufferInfo.presentationTimeUs;
+                        long nowNs = SystemClock.elapsedRealtimeNanos();
+                        maybeAdaptBitrate(codec, ptsUs, nowNs);
                     }
 
                     ByteBuffer codecBuffer = codec.getOutputBuffer(outputBufferId);
@@ -424,10 +436,18 @@ public class SurfaceEncoder implements AsyncProcessor {
     }
 
     private void lowerBitrate(MediaCodec codec, long nowNs) {
-        int newRate = Math.max(ABR_MIN_BITRATE, currentBitRate * 3 / 5);
+        // Aggressive down-shift: x0.4 (60M -> 24M -> 9.6M -> 5M in 3 steps)
+        // so mid/high bitrates drop instantly on stutter.
+        int newRate = Math.max(ABR_MIN_BITRATE, currentBitRate * 2 / 5);
         if (newRate == currentBitRate) {
             return;
         }
+        // Shrink the recovery ceiling to 80% of the pre-drop rate: the
+        // restore must not climb back to a rate that just overloaded the
+        // encoder (oscillation guard).
+        abrCeiling = Math.max(ABR_MIN_BITRATE, Math.min(abrCeiling, currentBitRate * 4 / 5));
+        abrCeilingStableSinceNs = 0;
+        Ln.i("ABR: ceiling shrunk to " + abrCeiling + " (oscillation guard)");
         Ln.i("ABR: bitrate " + currentBitRate + " -> " + newRate);
         applyBitrate(codec, newRate);
         currentBitRate = newRate;
@@ -435,14 +455,52 @@ public class SurfaceEncoder implements AsyncProcessor {
     }
 
     private void raiseBitrate(MediaCodec codec, long nowNs) {
-        int newRate = Math.min(videoBitRate, currentBitRate * 4 / 3);
+        // Segmented recovery:
+        //   < 10M:   x1.8  fast climb out of the valley (5M -> 9M -> 16.2M)
+        //   10-30M:  x1.5  medium steps (16.2M -> 24.3M -> 36.4M)
+        //   >= 30M:  x1.2  fine steps, avoid jumping back so hard that
+        //                 the encoder overloads again (36.4M -> 43.7M -> ...)
+        int factorNum = 6;
+        int factorDen = 5;
+        if (currentBitRate < 10_000_000) {
+            factorNum = 9;
+            factorDen = 5;
+        } else if (currentBitRate < 30_000_000) {
+            factorNum = 3;
+            factorDen = 2;
+        }
+        int target = currentBitRate * factorNum / factorDen;
+        boolean capped = target > abrCeiling;
+        if (capped) {
+            target = abrCeiling;
+        }
+        int newRate = Math.min(videoBitRate, target);
         if (newRate == currentBitRate) {
+            // Already at the ceiling: start/keep the stable timer, and
+            // slowly release the ceiling after a long healthy period.
+            if (abrCeilingStableSinceNs == 0) {
+                abrCeilingStableSinceNs = nowNs;
+            } else if (abrCeiling < videoBitRate
+                    && nowNs - abrCeilingStableSinceNs >= ABR_CEILING_RELEASE_DELAY_NS) {
+                int oldCeiling = abrCeiling;
+                abrCeiling = Math.min(videoBitRate, abrCeiling * 11 / 10);
+                abrCeilingStableSinceNs = nowNs;
+                Ln.i("ABR: ceiling released " + oldCeiling + " -> " + abrCeiling);
+            }
             return;
         }
-        Ln.i("ABR: stable, restoring bitrate " + currentBitRate + " -> " + newRate);
+        Ln.i("ABR: stable, restoring bitrate " + currentBitRate + " -> " + newRate
+                + (capped ? " (capped at ceiling " + abrCeiling + ")" : ""));
         applyBitrate(codec, newRate);
         currentBitRate = newRate;
         abrLastUpNs = nowNs;
+        if (currentBitRate >= abrCeiling) {
+            if (abrCeilingStableSinceNs == 0) {
+                abrCeilingStableSinceNs = nowNs;
+            }
+        } else {
+            abrCeilingStableSinceNs = 0;
+        }
         abrRestoring = true; // an overload in the next window must degrade immediately
     }
 
