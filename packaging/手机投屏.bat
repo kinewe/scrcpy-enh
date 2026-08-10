@@ -31,6 +31,7 @@ set "CONFIG_FILE=%SCRIPT_DIR%config.txt"
 set "FALLBACK_CONFIG=%SCRIPT_DIR%..\..\config.txt"
 
 rem ----- 串流参数：有线 USB 带宽充足用高规格；无线带宽有限保持低延迟 -----
+rem 有线规格：动态分配（:detect_display_spec 读取设备分辨率/刷新率后覆盖），此值为读取失败时的保底默认
 set "USB_ARGS=--keyboard=uhid --video-codec=h264 --video-bit-rate=50M --max-size 2560 --max-fps 120 --video-codec-options="max-b-frames:int=0,bitrate-mode:int=1,i-frame-interval:int=1" --render-driver=direct3d --video-buffer=0"
 set "WIFI_ARGS=--keyboard=uhid --video-codec=h264 --video-bit-rate=15M --max-size 1920 --max-fps 60"
 
@@ -187,6 +188,49 @@ if defined NEED_SAVE (
 goto :do_cast
 
 rem ============================================
+rem   动态规格分配：读取设备分辨率（wm size）与峰值刷新率（peak_refresh_rate），
+rem   按 分辨率×刷新率 估算有线 bit-rate；失败回退默认 50M/2560/120fps
+rem ============================================
+:detect_display_spec
+set "DEV_RES="
+set "DEV_W="
+set "DEV_H="
+for /f "tokens=3 delims=: " %%a in ('"!ADB!" -s !USB_DEV! shell wm size 2^>nul') do set "DEV_RES=%%a"
+if defined DEV_RES (
+    for /f "tokens=1,2 delims=x" %%a in ("!DEV_RES!") do (
+        set "DEV_W=%%a"
+        set "DEV_H=%%b"
+    )
+)
+set "DEV_FPS="
+for /f "delims=" %%a in ('"!ADB!" -s !USB_DEV! shell settings get system peak_refresh_rate 2^>nul') do set "DEV_FPS=%%a"
+if "!DEV_FPS!"=="null" set "DEV_FPS="
+if not defined DEV_FPS set "DEV_FPS=60"
+for /f "tokens=1 delims=." %%a in ("!DEV_FPS!") do set "DEV_FPS=%%a"
+if not defined DEV_H (
+    rem 读取/解析失败：回退默认有线规格
+    set "USB_ARGS=--keyboard=uhid --video-codec=h264 --video-bit-rate=50M --max-size 2560 --max-fps 120 --video-codec-options="max-b-frames:int=0,bitrate-mode:int=1,i-frame-interval:int=1" --render-driver=direct3d --video-buffer=0"
+    set "SPEC_INFO=设备规格读取失败，使用默认规格 h264/50M/2560/120fps"
+    exit /b 0
+)
+rem 计算：长边 -> max-size（上限 2560）；fps 上限 120；bit-rate 按 分辨率×刷新率 分级估算（clamp 15..80M）
+if !DEV_W! GEQ !DEV_H! (set "DEV_LONG=!DEV_W!") else (set "DEV_LONG=!DEV_H!")
+set "MAX_SIZE=!DEV_LONG!"
+if !DEV_LONG! GTR 2560 set "MAX_SIZE=2560"
+if !DEV_FPS! GTR 120 set "DEV_FPS=120"
+set /a "BR=!DEV_W!*!DEV_H!/2073600"
+if !BR! LSS 1 set "BR=1"
+set /a "BR=!BR!*!DEV_FPS!/60"
+if !BR! LSS 1 set "BR=1"
+set /a "BR=!BR!*15"
+if !BR! LSS 15 set "BR=15"
+if !BR! GTR 80 set "BR=80"
+set "USB_BITRATE=!BR!M"
+set "USB_ARGS=--keyboard=uhid --video-codec=h264 --video-bit-rate=!USB_BITRATE! --max-size !MAX_SIZE! --max-fps !DEV_FPS! --video-codec-options="max-b-frames:int=0,bitrate-mode:int=1,i-frame-interval:int=1" --render-driver=direct3d --video-buffer=0"
+set "SPEC_INFO=检测到设备 !DEV_W!x!DEV_H!@!DEV_FPS!Hz，有线规格 h264/!USB_BITRATE!/!MAX_SIZE!/!DEV_FPS!fps"
+exit /b 0
+
+rem ============================================
 rem   投屏循环（自动切换投屏模式）
 rem   scrcpy 退出后自动重新检测设备：
 rem   拔线 -> 自动切无线；插线 -> 自动切有线
@@ -212,9 +256,10 @@ if not errorlevel 1 (
     echo [流畅] 无线模式：带宽有限，已启用低延迟串流（h264/15M/1920/60fps，剪贴板自动同步（电脑复制即达手机））
     call :start_usb_watch
 ) else (
-    rem 有线 USB 连接：带宽充足，启用高规格串流
+    rem 有线 USB 连接：动态读取设备分辨率/刷新率，按设备能力分配规格（读取失败回退默认）
+    call :detect_display_spec
     set "CAST_ARGS=!USB_ARGS!"
-    echo [高清] 有线模式：USB 带宽充足，已启用高规格串流（h264/50M/2560/120fps/低延迟优化，剪贴板自动同步（电脑复制即达手机））
+    echo [高清] 有线模式：!SPEC_INFO!（低延迟优化，剪贴板自动同步（电脑复制即达手机））
 )
 rem ----- 保存当前代码页（scrcpy 可能改成 UTF-8），退出后恢复避免中文乱码 -----
 for /f "tokens=2 delims=:" %%c in ('chcp') do set "OLD_CP=%%c"
