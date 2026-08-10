@@ -17,6 +17,7 @@ import android.media.MediaCodec;
 import android.media.MediaCodecInfo;
 import android.media.MediaFormat;
 import android.os.Build;
+import android.os.Bundle;
 import android.os.Looper;
 import android.os.SystemClock;
 import android.view.Surface;
@@ -35,6 +36,49 @@ public class SurfaceEncoder implements AsyncProcessor {
     // Keep the values in descending order
     private static final int[] MAX_SIZE_FALLBACK = {2560, 1920, 1600, 1280, 1024, 800};
     private static final int MAX_CONSECUTIVE_ERRORS = 3;
+
+    // === ABR: short-window adaptive bitrate reduction ===
+    // When the encoder is overloaded (output frame rate drops well below
+    // the target for a short window, e.g. during boot animations or scene
+    // switches), reduce the bitrate step by step so the stream stays
+    // smooth (blurrier but not stuttering). Resolution is never changed.
+    private static final long ABR_WINDOW_NS = 150_000_000L; // 200ms detection window: boot animations and
+                                                       // scene-switch spikes are short; at 120fps a 200ms
+                                                       // window expects ~24 frames and catches short spikes
+                                                       // without being diluted by a longer average.
+    private static final int ABR_MIN_FRAMES_IN_WINDOW = 5; // 200ms window: fewer than 5 frames means the
+                                                      // stream is below ~25fps, treat as static screen
+                                                      // (loading screens / low activity) and ignore.
+    private static final float ABR_RATIO_THRESHOLD = 0.80f; // healthy if actual >= 80% of expected
+    private static final long ABR_MIN_DOWN_INTERVAL_NS = 500_000_000L; // debounce between downgrades
+    private static final long ABR_UP_DELAY_NS = 3_000_000_000L; // stable for 5s before trying to raise
+    private static final long ABR_MIN_UP_INTERVAL_NS = 2_000_000_000L; // debounce between raises
+    private static final int ABR_MIN_BITRATE = 10_000_000; // floor (15M)
+    private static final long ABR_DELAY_TRIGGER_MS = 40; // window avg delay delta (ms) above baseline -> overloaded
+    // Kept at 50ms: a 200ms window averages over fewer frames, so the
+    // mean is more volatile and the same 50ms threshold is already more
+    // sensitive than with a 500ms window (a short spike contributes a
+    // larger share of the average). Lowering it further (e.g. 40ms)
+    // would risk false downgrades on ordinary scrolling jitter.
+    private static final long ABR_DELAY_RECOVER_MS = 20; // window avg delay delta below this -> healthy
+
+    private int currentBitRate;
+    private long abrWindowStartNs;
+    private int abrWindowFrames;
+    private long abrLastDownNs;
+    private long abrStableSinceNs;
+    private long abrLastUpNs;
+    private int abrLastWindowActual;
+    // Output delay tracking: ptsUs comes from a monotonic clock whose base
+    // differs from elapsedRealtimeNanos (observed ~300s offset on K80), so
+    // only the delta from the calibrated baseline is meaningful.
+    private static final int ABR_CALIB_FRAMES = 10;
+    private long abrCalibSum;
+    private int abrCalibCount;
+    private long abrBaselineDelayMs;
+    private long abrWindowDelaySum;
+    private int abrWindowDelayCount;
+    private boolean abrRestoring; // bitrate was raised; next overload must degrade immediately
 
     private final SurfaceCapture capture;
     private final Streamer streamer;
@@ -251,6 +295,18 @@ public class SurfaceEncoder implements AsyncProcessor {
 
     private void encode(MediaCodec codec, Streamer streamer) throws IOException {
         MediaCodec.BufferInfo bufferInfo = new MediaCodec.BufferInfo();
+        // Fresh encoder session: start from the configured bitrate
+        currentBitRate = videoBitRate;
+        abrWindowStartNs = 0;
+        abrWindowFrames = 0;
+        abrLastDownNs = 0;
+        abrLastUpNs = 0;
+        abrStableSinceNs = 0;
+        abrCalibSum = 0;
+        abrCalibCount = 0;
+        abrBaselineDelayMs = 0;
+        abrWindowDelaySum = 0;
+        abrWindowDelayCount = 0;
 
         boolean eos;
         do {
@@ -264,6 +320,8 @@ public class SurfaceEncoder implements AsyncProcessor {
                         // If this is not a config packet, then it contains a frame
                         firstFrameSent = true;
                         consecutiveErrors = 0;
+                        maybeAdaptBitrate(codec, bufferInfo.presentationTimeUs,
+                                SystemClock.elapsedRealtimeNanos());
                     }
 
                     ByteBuffer codecBuffer = codec.getOutputBuffer(outputBufferId);
@@ -275,6 +333,127 @@ public class SurfaceEncoder implements AsyncProcessor {
                 }
             }
         } while (!eos);
+    }
+
+    /**
+     * Short-window encoder overload detection and adaptive bitrate reduction.
+     * Called once per encoded (output) frame. Every ABR_WINDOW_NS, compare the
+     * actual number of encoded frames with the expected number (maxFps x
+     * window). If the screen is not static and the ratio is too low, the
+     * encoder is overloaded: step the bitrate down (seamless via
+     * MediaCodec.setParameters, no resolution change). After a stable period
+     * the bitrate is raised back step by step.
+     */
+    private void maybeAdaptBitrate(MediaCodec codec, long ptsUs, long nowNs) {
+        // Delay calibration: the first frames measure the baseline encoder
+        // delay (ptsUs and elapsedRealtime use different monotonic bases).
+        long delayMs = (nowNs - ptsUs * 1000) / 1_000_000;
+        if (abrCalibCount < ABR_CALIB_FRAMES) {
+            abrCalibSum += delayMs;
+            abrCalibCount++;
+            if (abrCalibCount == ABR_CALIB_FRAMES) {
+                abrBaselineDelayMs = abrCalibSum / ABR_CALIB_FRAMES;
+                Ln.i("ABR: delay baseline=" + abrBaselineDelayMs + "ms");
+            }
+            return;
+        }
+        long delayDelta = delayMs - abrBaselineDelayMs;
+        abrWindowDelaySum += delayDelta;
+        abrWindowDelayCount++;
+
+        if (abrWindowStartNs == 0) {
+            abrWindowStartNs = nowNs;
+            abrWindowFrames = 1;
+            return;
+        }
+        abrWindowFrames++;
+        long elapsed = nowNs - abrWindowStartNs;
+        if (elapsed < ABR_WINDOW_NS) {
+            return;
+        }
+
+        // Window complete: evaluate both overload signals.
+        long expected = (long) (maxFps * (elapsed / 1_000_000_000.0));
+        int actual = abrWindowFrames;
+        abrLastWindowActual = actual;
+        long delayAvg = abrWindowDelayCount > 0
+                ? abrWindowDelaySum / abrWindowDelayCount : 0;
+        abrWindowStartNs = nowNs;
+        abrWindowFrames = 0;
+        abrWindowDelaySum = 0;
+        abrWindowDelayCount = 0;
+
+        // Static screens produce almost no frames: never treat them as overload.
+        boolean staticScreen = actual < ABR_MIN_FRAMES_IN_WINDOW;
+        boolean frameRateOk = expected < 5 || actual >= expected * ABR_RATIO_THRESHOLD;
+        boolean delayOk = delayAvg < ABR_DELAY_TRIGGER_MS;
+        // Only the encoder output delay (delta vs calibrated baseline) is the
+        // overload signal: a low frame count alone is NOT overload (the source
+        // may render few frames, e.g. animations or idle scenes).
+        boolean healthy = staticScreen || delayOk;
+
+        if (!healthy) {
+            abrStableSinceNs = 0;
+            // Overload during a restore phase must interrupt the restore
+            // immediately: skip the down-debounce so the bitrate drops right
+            // away instead of staying high while the page keeps stuttering.
+            boolean restoring = abrRestoring;
+            abrRestoring = false;
+            if (currentBitRate > ABR_MIN_BITRATE
+                    && (restoring || nowNs - abrLastDownNs >= ABR_MIN_DOWN_INTERVAL_NS)) {
+                Ln.i("ABR: overloaded"
+                        + (restoring ? " during restore, degrading" : "")
+                        + " (delayDelta=" + delayAvg
+                        + "ms, frames=" + actual + "/" + expected + ")");
+                lowerBitrate(codec, nowNs);
+            }
+            return;
+        }
+
+        // Healthy: recover step by step after a stable period.
+        if (abrStableSinceNs == 0) {
+            abrStableSinceNs = nowNs;
+        } else if (nowNs - abrStableSinceNs >= ABR_UP_DELAY_NS
+                && currentBitRate < videoBitRate
+                && nowNs - abrLastUpNs >= ABR_MIN_UP_INTERVAL_NS
+                && delayAvg < ABR_DELAY_RECOVER_MS) {
+            // reached the target again: restore phase finished
+            abrRestoring = false;
+            raiseBitrate(codec, nowNs);
+        }
+    }
+
+    private void lowerBitrate(MediaCodec codec, long nowNs) {
+        int newRate = Math.max(ABR_MIN_BITRATE, currentBitRate * 3 / 5);
+        if (newRate == currentBitRate) {
+            return;
+        }
+        Ln.i("ABR: bitrate " + currentBitRate + " -> " + newRate);
+        applyBitrate(codec, newRate);
+        currentBitRate = newRate;
+        abrLastDownNs = nowNs;
+    }
+
+    private void raiseBitrate(MediaCodec codec, long nowNs) {
+        int newRate = Math.min(videoBitRate, currentBitRate * 4 / 3);
+        if (newRate == currentBitRate) {
+            return;
+        }
+        Ln.i("ABR: stable, restoring bitrate " + currentBitRate + " -> " + newRate);
+        applyBitrate(codec, newRate);
+        currentBitRate = newRate;
+        abrLastUpNs = nowNs;
+        abrRestoring = true; // an overload in the next window must degrade immediately
+    }
+
+    private void applyBitrate(MediaCodec codec, int bitrate) {
+        try {
+            Bundle params = new Bundle();
+            params.putInt(MediaCodec.PARAMETER_KEY_VIDEO_BITRATE, bitrate);
+            codec.setParameters(params);
+        } catch (Exception e) {
+            Ln.w("ABR: setParameters failed: " + e.getMessage());
+        }
     }
 
     private static MediaCodec createMediaCodec(Codec codec, String encoderName) throws IOException, ConfigurationException {
