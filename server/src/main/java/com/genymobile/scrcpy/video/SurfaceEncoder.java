@@ -42,7 +42,7 @@ public class SurfaceEncoder implements AsyncProcessor {
     // the target for a short window, e.g. during boot animations or scene
     // switches), reduce the bitrate step by step so the stream stays
     // smooth (blurrier but not stuttering). Resolution is never changed.
-    private static final long ABR_WINDOW_NS = 100_000_000L; // 100ms detection window: boot animations and
+    private static final long ABR_WINDOW_NS = 50_000_000L; // 50ms detection window: boot animations and
                                                        // scene-switch spikes are short; at 120fps a 200ms
                                                        // window expects ~24 frames and catches short spikes
                                                        // without being diluted by a longer average.
@@ -50,14 +50,14 @@ public class SurfaceEncoder implements AsyncProcessor {
                                                       // stream is below ~25fps, treat as static screen
                                                       // (loading screens / low activity) and ignore.
     private static final float ABR_RATIO_THRESHOLD = 0.80f; // healthy if actual >= 80% of expected
-    private static final long ABR_MIN_DOWN_INTERVAL_NS = 500_000_000L; // debounce between downgrades
+    private static final long ABR_MIN_DOWN_INTERVAL_NS = 200_000_000L; // 200ms debounce between downgrades (fast, less backlog)
     private static final long ABR_UP_DELAY_NS = 150_000_000L; // stable for 150ms before trying to raise (fast recovery)
     private static final long ABR_MIN_UP_INTERVAL_NS = 150_000_000L; // 150ms debounce between raises (fast recovery)
     // Ceiling release: after this long without overload while capped, the
     // recovery ceiling is slowly relaxed (x1.1 per window) up to the initial rate.
     private static final long ABR_CEILING_RELEASE_DELAY_NS = 15_000_000_000L; // 15s (faster ceiling probe)
     private static final int ABR_MIN_BITRATE = 5_000_000; // floor (5M)
-    private static final long ABR_DELAY_TRIGGER_MS = 40; // window avg delay delta (ms) above baseline -> overloaded
+    private static final long ABR_DELAY_TRIGGER_MS = 30; // window avg delay delta (ms) above baseline -> overloaded (more sensitive)
     // Kept at 50ms: a 200ms window averages over fewer frames, so the
     // mean is more volatile and the same 50ms threshold is already more
     // sensitive than with a 500ms window (a short spike contributes a
@@ -88,6 +88,13 @@ public class SurfaceEncoder implements AsyncProcessor {
     private long abrWindowDelaySum;
     private int abrWindowDelayCount;
     private boolean abrRestoring; // bitrate was raised; next overload must degrade immediately
+    private boolean abrStateInitialized; // ABR state kept across encoder rebuilds
+    // Pulse detection for absolute-latency measurement: frames whose PTS
+    // gap from the previous frame exceeds 500ms are pulse frames (the test
+    // video flashes a red frame every second). Log the PTS so the PC-side
+    // script can timestamp the pulse via logcat arrival time.
+    private long pulseLastPtsUs = -1;
+    private long pulseLastLogNs;
 
     private final SurfaceCapture capture;
     private final Streamer streamer;
@@ -304,9 +311,23 @@ public class SurfaceEncoder implements AsyncProcessor {
 
     private void encode(MediaCodec codec, Streamer streamer) throws IOException {
         MediaCodec.BufferInfo bufferInfo = new MediaCodec.BufferInfo();
-        // Fresh encoder session: start from the configured bitrate
-        currentBitRate = videoBitRate;
-        abrCeiling = videoBitRate;
+        if (!abrStateInitialized) {
+            // First encoder session: start from the configured bitrate.
+            currentBitRate = videoBitRate;
+            abrCeiling = videoBitRate;
+            abrStateInitialized = true;
+        } else {
+            // Encoder rebuilt (rotation/size change -> MediaCodec reset):
+            // KEEP the ABR state instead of resetting to the initial bitrate
+            // (which would re-accumulate backlog and oscillate), and re-apply
+            // the kept bitrate to the new encoder instance.
+            Bundle p = new Bundle();
+            p.putInt(MediaCodec.PARAMETER_KEY_VIDEO_BITRATE, currentBitRate);
+            codec.setParameters(p);
+            Ln.i("ABR: encoder rebuilt, keeping bitrate=" + currentBitRate
+                    + " ceiling=" + abrCeiling);
+        }
+        // Window/calibration state always resets for the new session.
         abrCeilingStableSinceNs = 0;
         abrWindowStartNs = 0;
         abrWindowFrames = 0;
@@ -334,6 +355,18 @@ public class SurfaceEncoder implements AsyncProcessor {
                         long ptsUs = bufferInfo.presentationTimeUs;
                         long nowNs = SystemClock.elapsedRealtimeNanos();
                         maybeAdaptBitrate(codec, ptsUs, nowNs);
+                        // Absolute-latency pulse detection: PTS gap > 500ms
+                        // marks a pulse frame (test video: 1 red frame per
+                        // second). Rate-limited to 200ms so one pulse logs
+                        // once (the 83ms pulse spans ~5 frames, only the
+                        // first has a gap > 500ms anyway).
+                        if (pulseLastPtsUs >= 0
+                                && ptsUs - pulseLastPtsUs > 500_000
+                                && nowNs - pulseLastLogNs >= 200_000_000L) {
+                            Ln.i("PULSE: pts=" + ptsUs);
+                            pulseLastLogNs = nowNs;
+                        }
+                        pulseLastPtsUs = ptsUs;
                     }
 
                     ByteBuffer codecBuffer = codec.getOutputBuffer(outputBufferId);
@@ -366,6 +399,15 @@ public class SurfaceEncoder implements AsyncProcessor {
             if (abrCalibCount == ABR_CALIB_FRAMES) {
                 abrBaselineDelayMs = abrCalibSum / ABR_CALIB_FRAMES;
                 Ln.i("ABR: delay baseline=" + abrBaselineDelayMs + "ms");
+                // Clock anchor for absolute-latency measurement: the device
+                // epoch at this SystemClock instant. PTS is device
+                // SystemClock (uptime-based) microseconds, NOT epoch; device
+                // encoding time (epoch) of any frame is boot_epoch + pts/1000
+                // where boot_epoch = epoch - pts_us/1000 captured here. The
+                // pc-side script parses this line to convert frame pts to
+                // device epoch, then applies its own pc<->device offset.
+                Ln.i("ABR: clock anchor pts_us=" + ptsUs
+                        + " epoch=" + System.currentTimeMillis());
             }
             return;
         }
@@ -436,18 +478,19 @@ public class SurfaceEncoder implements AsyncProcessor {
     }
 
     private void lowerBitrate(MediaCodec codec, long nowNs) {
-        // Aggressive down-shift: x0.4 (60M -> 24M -> 9.6M -> 5M in 3 steps)
+        // Aggressive down-shift: x0.3 (60M -> 18M -> 5.4M -> 5M in 3 steps)
         // so mid/high bitrates drop instantly on stutter.
-        int newRate = Math.max(ABR_MIN_BITRATE, currentBitRate * 2 / 5);
+        int newRate = Math.max(ABR_MIN_BITRATE, currentBitRate * 3 / 10);
         if (newRate == currentBitRate) {
             return;
         }
-        // Shrink the recovery ceiling to 80% of the pre-drop rate: the
-        // restore must not climb back to a rate that just overloaded the
-        // encoder (oscillation guard).
-        abrCeiling = Math.max(ABR_MIN_BITRATE, Math.min(abrCeiling, currentBitRate * 4 / 5));
+        // Recovery ceiling = the downgraded rate itself: the restore must
+        // not climb back above the rate that just overloaded the encoder
+        // (oscillation guard). The ceiling is slowly released (x1.1) after
+        // ABR_CEILING_RELEASE_DELAY_NS without overload.
+        abrCeiling = newRate;
         abrCeilingStableSinceNs = 0;
-        Ln.i("ABR: ceiling shrunk to " + abrCeiling + " (oscillation guard)");
+        Ln.i("ABR: ceiling capped at " + abrCeiling + " (oscillation guard)");
         Ln.i("ABR: bitrate " + currentBitRate + " -> " + newRate);
         applyBitrate(codec, newRate);
         currentBitRate = newRate;
