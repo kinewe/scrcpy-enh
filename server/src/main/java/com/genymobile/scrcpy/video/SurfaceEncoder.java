@@ -58,6 +58,12 @@ public class SurfaceEncoder implements AsyncProcessor {
     private static final long ABR_CEILING_RELEASE_DELAY_NS = 15_000_000_000L; // 15s (faster ceiling probe)
     private static final int ABR_MIN_BITRATE = 5_000_000; // floor (5M)
     private static final long ABR_DELAY_TRIGGER_MS = 30; // window avg delay delta (ms) above baseline -> overloaded (more sensitive)
+    // Instant single-frame trigger: a single frame whose calibrated
+    // delayDelta exceeds this threshold degrades immediately (no window
+    // wait), catching startup bursts within ~10ms. Debounce is 80ms so
+    // the 3-step chain (60->18->5.4->5M) completes in ~240ms.
+    private static final long ABR_INSTANT_TRIGGER_MS = 30;
+    private static final long ABR_INSTANT_INTERVAL_NS = 15_000_000L; // 15ms debounce between instant triggers (3-step chain 60->18->5.4->5M in ~45ms)
     // Kept at 50ms: a 200ms window averages over fewer frames, so the
     // mean is more volatile and the same 50ms threshold is already more
     // sensitive than with a 500ms window (a short spike contributes a
@@ -95,6 +101,15 @@ public class SurfaceEncoder implements AsyncProcessor {
     // script can timestamp the pulse via logcat arrival time.
     private long pulseLastPtsUs = -1;
     private long pulseLastLogNs;
+    // Frame-complexity lookahead: the encoded frame size reflects content
+    // complexity (a complex frame costs more to encode, so the current
+    // frame is already slow). A frame larger than the per-frame bitrate
+    // budget x1.5 degrades immediately (one-frame response ~8ms, before
+    // the backlog-based detection fires ~75ms later), giving preventive
+    // low bitrate during animations. Static frames are small and never
+    // trigger, keeping high bitrate on still scenes.
+    private static final int ABR_COMPLEXITY_FACTOR = 3; // x1.5 as budget*3/2
+    private long abrLastComplexLogNs; // rate-limit the complex-frame log (1/s)
 
     private final SurfaceCapture capture;
     private final Streamer streamer;
@@ -355,6 +370,32 @@ public class SurfaceEncoder implements AsyncProcessor {
                         long ptsUs = bufferInfo.presentationTimeUs;
                         long nowNs = SystemClock.elapsedRealtimeNanos();
                         maybeAdaptBitrate(codec, ptsUs, nowNs);
+                        // Frame-complexity lookahead: complex frame (bigger
+                        // than the per-frame bitrate budget x1.5) -> degrade
+                        // immediately, before the backlog-based detection ever
+                        // fires. Budget uses the current frame rate estimated
+                        // from the frame gap (normal 8-17ms; a gap >500ms is a
+                        // dropped frame, not a normal frame interval).
+                        long gapUs = ptsUs - pulseLastPtsUs;
+                        if (gapUs > 0 && gapUs < 500_000) {
+                            long fps = 1_000_000 / gapUs;
+                            if (fps > 0) {
+                                long budgetBytes = currentBitRate / fps / 8;
+                                if (budgetBytes > 0
+                                        && bufferInfo.size > budgetBytes * ABR_COMPLEXITY_FACTOR / 2
+                                        && currentBitRate > ABR_MIN_BITRATE
+                                        && nowNs - abrLastDownNs >= ABR_INSTANT_INTERVAL_NS) {
+                                    abrStableSinceNs = 0;
+                                    abrRestoring = false;
+                                    if (nowNs - abrLastComplexLogNs >= 1_000_000_000L) {
+                                        Ln.i("ABR: complex frame (bytes="
+                                                + (bufferInfo.size / 1024) + "KB > budget x1.5), degrading");
+                                        abrLastComplexLogNs = nowNs;
+                                    }
+                                    lowerBitrate(codec, nowNs);
+                                }
+                            }
+                        }
                         // Absolute-latency pulse detection: PTS gap > 500ms
                         // marks a pulse frame (test video: 1 red frame per
                         // second). Rate-limited to 200ms so one pulse logs
@@ -412,6 +453,19 @@ public class SurfaceEncoder implements AsyncProcessor {
             return;
         }
         long delayDelta = delayMs - abrBaselineDelayMs;
+        // Instant single-frame trigger: one frame over the threshold degrades
+        // immediately (startup bursts are caught within ~10ms instead of
+        // waiting a full window). Unified 80ms debounce for the down chain;
+        // the window detection below remains as a backstop. Restore/ceiling
+        // mechanism is untouched.
+        if (delayDelta > ABR_INSTANT_TRIGGER_MS
+                && currentBitRate > ABR_MIN_BITRATE
+                && nowNs - abrLastDownNs >= ABR_INSTANT_INTERVAL_NS) {
+            abrStableSinceNs = 0;
+            abrRestoring = false;
+            Ln.i("ABR: instant overload (delayDelta=" + delayDelta + "ms), degrading");
+            lowerBitrate(codec, nowNs);
+        }
         abrWindowDelaySum += delayDelta;
         abrWindowDelayCount++;
 
