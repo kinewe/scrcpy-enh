@@ -52,12 +52,12 @@ public class SurfaceEncoder implements AsyncProcessor {
     private static final float ABR_RATIO_THRESHOLD = 0.80f; // healthy if actual >= 80% of expected
     private static final long ABR_MIN_DOWN_INTERVAL_NS = 200_000_000L; // 200ms debounce between downgrades (fast, less backlog)
     private static final long ABR_UP_DELAY_NS = 150_000_000L; // stable for 150ms before trying to raise (fast recovery)
-    private static final long ABR_MIN_UP_INTERVAL_NS = 1_500_000_000L; // 1.5s between raises (5->8.5->14.5->24.6->41.8->60M in ~7.5s)
+    private static final long ABR_MIN_UP_INTERVAL_NS = 500_000_000L; // 0.5s between raises (1->2->4->8->16->32->60M in ~3s)
     private static final long ABR_BITRATE_RESTORE_NS = 2_000_000_000L; // fps=120 must stay stable 2s before the bitrate restore may start
     // Ceiling release: after this long without overload while capped, the
     // recovery ceiling is relaxed (x1.7 per window) up to the initial rate,
     // matching the raise cadence so a full recovery takes ~7.5s.
-    private static final long ABR_CEILING_RELEASE_DELAY_NS = 1_500_000_000L; // 1.5s (fast ceiling probe)
+    private static final long ABR_CEILING_RELEASE_DELAY_NS = 500_000_000L; // 0.5s (fast ceiling probe, matches raise cadence)
     private static final int ABR_MIN_BITRATE = 1_000_000; // floor (1M: fps-first policy, bitrate is the buffer)
     // === ABR second dimension: dynamic frame rate ===
     // When the bitrate hits the floor (5M) and the encoder is still
@@ -66,12 +66,20 @@ public class SurfaceEncoder implements AsyncProcessor {
     // after 3s stable the fps probes one step up; once back at full fps and
     // stable again, the bitrate restore path (ceiling x1.1) is allowed.
     private static final int[] ABR_FPS_LEVELS = {120, 60, 30}; // keep descending (30 floor: 60 still stalls in some scenes; fast restore 1-2s makes the 30 fallback acceptable)
-    private static final long ABR_FPS_STABLE_PROBE_NS = 1_000_000_000L; // stable 1s before probing fps up (fast converge)
-    private static final long ABR_FPS_PROBE_WATCH_NS = 1_000_000_000L; // watch 1s after probing; overload reverts
+    private static final long ABR_FPS_STABLE_PROBE_NS = 500_000_000L; // stable 500ms before probing fps up (user: +100ms for手感, smoother restore)
+    private static final long ABR_FPS_PROBE_WATCH_NS = 400_000_000L; // watch 400ms after probing; overload reverts
     private static final long ABR_FPS_REVERT_COOLDOWN_NS = 3_000_000_000L; // after a revert, wait 3s before probing again (anti-oscillation)
-    // fps is the LAST resort: only degrade it after the bitrate sits at the
-    // floor AND the window overload is sustained for this long (~3 windows).
-    private static final long ABR_FPS_DROP_MIN_NS = 300_000_000L; // 300ms sustained window overload
+    // fps is the LAST resort: it drops only when the bitrate sits at the
+    // floor AND ABR_FPS_INSTANT_STREAK consecutive frames are instant-
+    // overloaded (fast: startup bursts reach the count in ~50-100ms at
+    // 120fps), or when the restore phase fails twice within 1s (below).
+    private static final int ABR_FPS_INSTANT_STREAK = 3; // consecutive instant-overload frames
+    // Restore-phase guard: 2 overloads within this window while the bitrate
+    // is climbing -> the bitrate buffer keeps failing, the fps level must
+    // share the load (drop one level and stop the restore). Sliding/video
+    // frames quantize small at 1M so they never sustain overloads -> no
+    // false fps drops there.
+    private static final long ABR_FPS_RESTORE_OVERLOAD_WINDOW_NS = 1_000_000_000L; // 1s
     private static final long ABR_DELAY_TRIGGER_MS = 30; // window avg delay delta (ms) above baseline -> overloaded (more sensitive)
     // Instant single-frame trigger: a single frame whose calibrated
     // delayDelta exceeds this threshold degrades immediately (no window
@@ -125,6 +133,9 @@ public class SurfaceEncoder implements AsyncProcessor {
     private int fpsProbeFrom; // fps level before the probe (for revert)
     private long fpsRevertUntilNs; // probe cooldown after a revert (anti-oscillation)
     private long overloadSinceNs; // start of the current sustained window-overload streak
+    private int instantOverloadStreak; // consecutive instant-overload frames (fps drop needs >= ABR_FPS_INSTANT_STREAK)
+    private long brOverloadFirstNs; // first overload of the current restore-phase window
+    private int brOverloadCount; // overloads counted inside the restore-phase window
     private long abrFpsFloorLogNs; // rate-limit the "fps already at floor" log
     // Frame-complexity lookahead: the encoded frame size reflects content
     // complexity (a complex frame costs more to encode, so the current
@@ -441,7 +452,7 @@ public class SurfaceEncoder implements AsyncProcessor {
                                                 + (bufferInfo.size / 1024) + "KB > budget x1.5), degrading");
                                         abrLastComplexLogNs = nowNs;
                                     }
-                                    onOverload(codec, nowNs, false); // probe-insensitive: momentary spike
+                                    onOverload(codec, nowNs, false, false); // complex: probe-insensitive, never counts restore-overloads
                                 }
                             }
                         }
@@ -522,20 +533,25 @@ public class SurfaceEncoder implements AsyncProcessor {
         // waiting a full window). Unified 80ms debounce for the down chain;
         // the window detection below remains as a backstop. Restore/ceiling
         // mechanism is untouched.
-        if (delayDelta > ABR_INSTANT_TRIGGER_MS
-                && nowNs - abrLastDownNs >= ABR_INSTANT_INTERVAL_NS) {
-            abrStableSinceNs = 0;
-            abrRestoring = false;
-            // Rate-limit the log (1/s): with the 5ms debounce a sustained
-            // overload would otherwise spam one line per trigger and bury
-            // the bitrate/fps step lines the user watches.
-            if (nowNs - abrInstantLogNs >= 1_000_000_000L) {
-                Ln.i("ABR: instant overload (delayDelta=" + delayDelta + "ms), degrading");
-                abrInstantLogNs = nowNs;
+        if (delayDelta > ABR_INSTANT_TRIGGER_MS) {
+            instantOverloadStreak++;
+            if (nowNs - abrLastDownNs >= ABR_INSTANT_INTERVAL_NS) {
+                abrStableSinceNs = 0;
+                boolean wasRestoring = abrRestoring;
+                abrRestoring = false;
+                // Rate-limit the log (1/s): with the 5ms debounce a sustained
+                // overload would otherwise spam one line per trigger and bury
+                // the bitrate/fps step lines the user watches.
+                if (nowNs - abrInstantLogNs >= 1_000_000_000L) {
+                    Ln.i("ABR: instant overload (delayDelta=" + delayDelta + "ms), degrading");
+                    abrInstantLogNs = nowNs;
+                }
+                // An I-frame spike is momentary (its encode cost is one frame);
+                // during a probe watch window it must not abort the probe.
+                onOverload(codec, nowNs, !isKeyFrame, wasRestoring);
             }
-            // An I-frame spike is momentary (its encode cost is one frame);
-            // during a probe watch window it must not abort the probe.
-            onOverload(codec, nowNs, !isKeyFrame);
+        } else {
+            instantOverloadStreak = 0; // non-instant frame resets the streak
         }
         abrWindowDelaySum += delayDelta;
         abrWindowDelayCount++;
@@ -586,11 +602,13 @@ public class SurfaceEncoder implements AsyncProcessor {
                         + (restoring ? " during restore, degrading" : "")
                         + " (delayDelta=" + delayAvg
                         + "ms, frames=" + actual + "/" + expected + ")");
-                onOverload(codec, nowNs, true); // window overload: sustained, probe-sensitive
+                onOverload(codec, nowNs, true, restoring); // window overload: sustained, probe-sensitive
             }
             return;
         }
         overloadSinceNs = 0; // overload streak broken
+        brOverloadFirstNs = 0; // not restoring anymore: the restore-phase window is void
+        brOverloadCount = 0;
 
         // Healthy: fps-first restore, bitrate last. The fps dimension owns
         // the recovery while below full fps; the bitrate restore (existing
@@ -650,8 +668,26 @@ public class SurfaceEncoder implements AsyncProcessor {
      * the probed fps level; a momentary spike (I frame / complex frame)
      * only lowers the bitrate and never touches fps.
      */
-    private void onOverload(MediaCodec codec, long nowNs, boolean probeSensitive) {
-        fpsStableSinceNs = 0;
+    private void onOverload(MediaCodec codec, long nowNs, boolean probeSensitive, boolean wasRestoring) {
+        // Restore-phase repeated overload (wasRestoring: the bitrate was
+        // climbing and fps was at full rate): the bitrate buffer keeps
+        // failing, so the fps level must share the load. 2 overloads within
+        // ABR_FPS_RESTORE_OVERLOAD_WINDOW_NS -> drop one fps level and stop
+        // the restore (abrRestoring was already cleared by the trigger).
+        // Sliding/video never sustain overloads at 1M, so a single spike
+        // (or a lone flicker) never triggers this path.
+        if (wasRestoring && fpsProbeUntilNs <= 0) {
+            if (brOverloadFirstNs == 0 || nowNs - brOverloadFirstNs > ABR_FPS_RESTORE_OVERLOAD_WINDOW_NS) {
+                brOverloadFirstNs = nowNs;
+                brOverloadCount = 1;
+            } else if (++brOverloadCount >= 2) {
+                brOverloadFirstNs = 0;
+                brOverloadCount = 0;
+                Ln.i("ABR: repeated overload during restore, fps degrade (gl drop)");
+                lowerFps(codec, nowNs);
+                return;
+            }
+        }
         // Overload inside a probe watch window: the probed fps level cannot
         // sustain the load, revert immediately to the previous level.
         if (fpsProbeUntilNs > 0) {
@@ -662,19 +698,33 @@ public class SurfaceEncoder implements AsyncProcessor {
             }
             return;
         }
-        // Bitrate is the buffer: always degrade it first.
+        // Sustained overload (instant/window) breaks the fps stable timer;
+        // a momentary complex-frame spike must NOT (at the 1M floor the
+        // complexity threshold is ~1.5KB so almost every frame qualifies,
+        // which would otherwise starve the fps/bitrate recovery forever).
+        if (probeSensitive) {
+            fpsStableSinceNs = 0;
+        }
         if (currentBitRate > ABR_MIN_BITRATE) {
-            lowerBitrate(codec, nowNs);
+            // Sustained overload (instant/window) drops hard (x0.3): it is a
+            // real encoder threat. A complex-frame spike during the recovery
+            // phase concedes gently (x0.7) so the bitrate keeps climbing
+            // afterwards instead of bouncing back to the floor.
+            lowerBitrate(codec, nowNs, !probeSensitive && abrRestoring);
             return;
         }
-        // Bitrate at the floor: fps moves only on SUSTAINED window overload
-        // (instant/complex spikes never degrade fps directly).
-        if (overloadSinceNs != 0 && nowNs - overloadSinceNs >= ABR_FPS_DROP_MIN_NS) {
+        // Bitrate at the floor: fps moves only after ABR_FPS_INSTANT_STREAK
+        // consecutive instant-overload frames (fast: a startup burst reaches
+        // the count in ~50-100ms at 120fps). A lone spike never degrades
+        // fps; sliding/video at 1M quantize small so the streak never builds.
+        if (probeSensitive && instantOverloadStreak >= ABR_FPS_INSTANT_STREAK) {
             lowerFps(codec, nowNs);
         }
     }
 
     private void lowerFps(MediaCodec codec, long nowNs) {
+        brOverloadFirstNs = 0; // new fps level: fresh restore-overload window
+        brOverloadCount = 0;
         int idx = indexOfFps(abrFps);
         if (idx < 0 || idx >= ABR_FPS_LEVELS.length - 1) {
             if (nowNs - abrFpsFloorLogNs >= 1_000_000_000L) {
@@ -763,9 +813,16 @@ public class SurfaceEncoder implements AsyncProcessor {
     }
 
     private void lowerBitrate(MediaCodec codec, long nowNs) {
+        lowerBitrate(codec, nowNs, false);
+    }
+
+    private void lowerBitrate(MediaCodec codec, long nowNs, boolean gentle) {
         // Aggressive down-shift: x0.3 (60M -> 18M -> 5.4M -> 5M in 3 steps)
         // so mid/high bitrates drop instantly on stutter.
-        int newRate = Math.max(ABR_MIN_BITRATE, currentBitRate * 3 / 10);
+        // gentle (recovery-phase complex-frame concession): x0.7, stay well
+        // above the floor and keep the climb going (no floor bounce).
+        int factorNum = gentle ? 7 : 3;
+        int newRate = Math.max(ABR_MIN_BITRATE, currentBitRate * factorNum / 10);
         if (newRate == currentBitRate) {
             return;
         }
@@ -783,14 +840,14 @@ public class SurfaceEncoder implements AsyncProcessor {
     }
 
     private void raiseBitrate(MediaCodec codec, long nowNs) {
-        // Fast recovery: uniform x1.7 steps every 1.5s
-        //   5M -> 8.5M -> 14.5M -> 24.6M -> 41.8M -> 60M (~7.5s full)
-        // (capped by the recovery ceiling, which itself releases x1.7 per
-        // 1.5s window; an overload during restore degrades immediately via
+        // Fast recovery: uniform x2 steps every 0.5s
+        //   1M -> 2M -> 4M -> 8M -> 16M -> 32M -> 60M (~3s full)
+        // (capped by the recovery ceiling, which itself releases x2 per
+        // 0.5s window; an overload during restore degrades immediately via
         // abrRestoring, so the old slow ceiling is no longer needed as the
         // primary oscillation guard)
-        int factorNum = 17;
-        int factorDen = 10;
+        int factorNum = 2;
+        int factorDen = 1;
         int target = currentBitRate * factorNum / factorDen;
         boolean capped = target > abrCeiling;
         if (capped) {
@@ -805,7 +862,7 @@ public class SurfaceEncoder implements AsyncProcessor {
             } else if (abrCeiling < videoBitRate
                     && nowNs - abrCeilingStableSinceNs >= ABR_CEILING_RELEASE_DELAY_NS) {
                 int oldCeiling = abrCeiling;
-                abrCeiling = Math.min(videoBitRate, abrCeiling * 17 / 10);
+                abrCeiling = Math.min(videoBitRate, abrCeiling * 2);
                 abrCeilingStableSinceNs = nowNs;
                 Ln.i("ABR: ceiling released " + oldCeiling + " -> " + abrCeiling);
             }
@@ -824,6 +881,8 @@ public class SurfaceEncoder implements AsyncProcessor {
             abrCeilingStableSinceNs = 0;
         }
         abrRestoring = true; // an overload in the next window must degrade immediately
+        brOverloadFirstNs = 0; // fresh restore-phase overload window (repeated-overload fps guard)
+        brOverloadCount = 0;
     }
 
     private void applyBitrate(MediaCodec codec, int bitrate) {
