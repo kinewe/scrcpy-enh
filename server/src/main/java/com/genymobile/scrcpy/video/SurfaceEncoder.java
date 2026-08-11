@@ -63,9 +63,10 @@ public class SurfaceEncoder implements AsyncProcessor {
     // independent), degrade the frame rate instead. Restore is fps-first:
     // after 3s stable the fps probes one step up; once back at full fps and
     // stable again, the bitrate restore path (ceiling x1.1) is allowed.
-    private static final int[] ABR_FPS_LEVELS = {120, 60, 45, 30}; // keep descending
-    private static final long ABR_FPS_STABLE_PROBE_NS = 3_000_000_000L; // stable 3s before probing fps up
-    private static final long ABR_FPS_PROBE_WATCH_NS = 2_500_000_000L; // watch 2.5s after probing; overload reverts
+    private static final int[] ABR_FPS_LEVELS = {120, 60}; // keep descending (60 floor: 30/45 looked choppy in real use)
+    private static final long ABR_FPS_STABLE_PROBE_NS = 1_000_000_000L; // stable 1s before probing fps up (fast converge)
+    private static final long ABR_FPS_PROBE_WATCH_NS = 1_000_000_000L; // watch 1s after probing; overload reverts
+    private static final long ABR_FPS_REVERT_COOLDOWN_NS = 3_000_000_000L; // after a revert, wait 3s before probing again (anti-oscillation)
     private static final long ABR_DELAY_TRIGGER_MS = 30; // window avg delay delta (ms) above baseline -> overloaded (more sensitive)
     // Instant single-frame trigger: a single frame whose calibrated
     // delayDelta exceeds this threshold degrades immediately (no window
@@ -117,6 +118,7 @@ public class SurfaceEncoder implements AsyncProcessor {
     private long fpsStableSinceNs; // no-overload timer for the fps dimension
     private long fpsProbeUntilNs; // probe watch window end (0 = not probing)
     private int fpsProbeFrom; // fps level before the probe (for revert)
+    private long fpsRevertUntilNs; // probe cooldown after a revert (anti-oscillation)
     private long abrFpsFloorLogNs; // rate-limit the "fps already at floor" log
     // Frame-complexity lookahead: the encoded frame size reflects content
     // complexity (a complex frame costs more to encode, so the current
@@ -595,15 +597,19 @@ public class SurfaceEncoder implements AsyncProcessor {
             }
             return;
         }
-        // Below full fps: after 3s stable, probe one level up. Bitrate stays
-        // frozen at the floor while fps < full (ceiling not released).
+        // Below full fps: after 1s stable, probe one level up. Bitrate stays
+        // frozen at the floor while fps < full (ceiling not released). A
+        // recent revert blocks probing for the cooldown window.
         if (abrFps < fpsRestoreCeiling()) {
+            if (nowNs < fpsRevertUntilNs) {
+                return;
+            }
             if (nowNs - fpsStableSinceNs >= ABR_FPS_STABLE_PROBE_NS) {
                 probeFpsUp(codec, nowNs);
             }
             return;
         }
-        // Full fps: still require 3s fps-stable before the bitrate restore
+        // Full fps: still require 1s fps-stable before the bitrate restore
         // path (existing logic below) may run.
         if (nowNs - fpsStableSinceNs < ABR_FPS_STABLE_PROBE_NS) {
             return;
@@ -696,6 +702,7 @@ public class SurfaceEncoder implements AsyncProcessor {
         }
         fpsStableSinceNs = 0;
         abrLastDownNs = nowNs;
+        fpsRevertUntilNs = nowNs + ABR_FPS_REVERT_COOLDOWN_NS; // no probing for 3s
     }
 
     /**
