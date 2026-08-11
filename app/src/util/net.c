@@ -150,6 +150,16 @@ net_connect(sc_socket socket, uint32_t addr, uint16_t port) {
         return false;
     }
 
+    // Enlarge the socket buffers (Windows default ~64KB) so large frames and
+    // encoder bursts are absorbed by the kernel instead of queueing up in the
+    // ADB transport (observed ~500ms latency peaks on 194KB frames at 120fps).
+    // Non-fatal if the platform rejects the size.
+    int bufsize = 1 << 20; // 1MB
+    setsockopt(raw_sock, SOL_SOCKET, SO_RCVBUF, (const char *) &bufsize,
+               sizeof(bufsize));
+    setsockopt(raw_sock, SOL_SOCKET, SO_SNDBUF, (const char *) &bufsize,
+               sizeof(bufsize));
+
     return true;
 }
 

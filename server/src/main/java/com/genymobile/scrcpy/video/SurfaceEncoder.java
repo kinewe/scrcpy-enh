@@ -56,14 +56,14 @@ public class SurfaceEncoder implements AsyncProcessor {
     // Ceiling release: after this long without overload while capped, the
     // recovery ceiling is slowly relaxed (x1.1 per window) up to the initial rate.
     private static final long ABR_CEILING_RELEASE_DELAY_NS = 15_000_000_000L; // 15s (faster ceiling probe)
-    private static final int ABR_MIN_BITRATE = 5_000_000; // floor (5M)
+    private static final int ABR_MIN_BITRATE = 1_000_000; // floor (1M, aggressive experiment)
     private static final long ABR_DELAY_TRIGGER_MS = 30; // window avg delay delta (ms) above baseline -> overloaded (more sensitive)
     // Instant single-frame trigger: a single frame whose calibrated
     // delayDelta exceeds this threshold degrades immediately (no window
     // wait), catching startup bursts within ~10ms. Debounce is 80ms so
-    // the 3-step chain (60->18->5.4->5M) completes in ~240ms.
+    // the 3-step chain (60->18->5.4->1.62->1M) completes in ~240ms.
     private static final long ABR_INSTANT_TRIGGER_MS = 30;
-    private static final long ABR_INSTANT_INTERVAL_NS = 15_000_000L; // 15ms debounce between instant triggers (3-step chain 60->18->5.4->5M in ~45ms)
+    private static final long ABR_INSTANT_INTERVAL_NS = 15_000_000L; // 15ms debounce between instant triggers (3-step chain 60->18->5.4->1.62->1M in ~60ms)
     // Kept at 50ms: a 200ms window averages over fewer frames, so the
     // mean is more volatile and the same 50ms threshold is already more
     // sensitive than with a 500ms window (a short spike contributes a
@@ -101,6 +101,7 @@ public class SurfaceEncoder implements AsyncProcessor {
     // script can timestamp the pulse via logcat arrival time.
     private long pulseLastPtsUs = -1;
     private long pulseLastLogNs;
+    private long frameLogLastNs; // rate-limit the FRAME diagnosis log
     // Frame-complexity lookahead: the encoded frame size reflects content
     // complexity (a complex frame costs more to encode, so the current
     // frame is already slow). A frame larger than the per-frame bitrate
@@ -408,6 +409,21 @@ public class SurfaceEncoder implements AsyncProcessor {
                             pulseLastLogNs = nowNs;
                         }
                         pulseLastPtsUs = ptsUs;
+                        // Frame diagnosis: type (I/P) + calibrated delay
+                        // delta + size. I frames always logged; P frames when
+                        // delayed >100ms or sampled every 500ms (no spam).
+                        // delayDelta = encode duration of this frame (the
+                        // suspect for the splash first-frame latency: a large
+                        // 2K I frame may take 200-500ms to encode).
+                        boolean isKey = (bufferInfo.flags & MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0;
+                        long fdelay = abrBaselineDelayMs > 0
+                                ? (nowNs - ptsUs * 1000) / 1_000_000 - abrBaselineDelayMs : -1;
+                        if (isKey || fdelay > 100 || nowNs - frameLogLastNs >= 500_000_000L) {
+                            Ln.i("FRAME: type=" + (isKey ? "I" : "P") + " pts=" + ptsUs
+                                    + " delayDelta=" + fdelay + "ms size="
+                                    + (bufferInfo.size / 1024) + "KB");
+                            frameLogLastNs = nowNs;
+                        }
                     }
 
                     ByteBuffer codecBuffer = codec.getOutputBuffer(outputBufferId);
@@ -532,7 +548,7 @@ public class SurfaceEncoder implements AsyncProcessor {
     }
 
     private void lowerBitrate(MediaCodec codec, long nowNs) {
-        // Aggressive down-shift: x0.3 (60M -> 18M -> 5.4M -> 5M in 3 steps)
+        // Aggressive down-shift: x0.3 (60M -> 18M -> 5.4M -> 1.62M -> 1M)
         // so mid/high bitrates drop instantly on stutter.
         int newRate = Math.max(ABR_MIN_BITRATE, currentBitRate * 3 / 10);
         if (newRate == currentBitRate) {
@@ -553,7 +569,7 @@ public class SurfaceEncoder implements AsyncProcessor {
 
     private void raiseBitrate(MediaCodec codec, long nowNs) {
         // Segmented recovery:
-        //   < 10M:   x1.8  fast climb out of the valley (5M -> 9M -> 16.2M)
+        //   < 10M:   x1.8  fast climb out of the valley (1M -> 1.8M -> 3.24M)
         //   10-30M:  x1.5  medium steps (16.2M -> 24.3M -> 36.4M)
         //   >= 30M:  x1.2  fine steps, avoid jumping back so hard that
         //                 the encoder overloads again (36.4M -> 43.7M -> ...)
@@ -661,6 +677,16 @@ public class SurfaceEncoder implements AsyncProcessor {
         if (Build.VERSION.SDK_INT >= AndroidVersions.API_26_ANDROID_8_0) {
             // output 1 frame as soon as 1 frame is queued
             format.setInteger(MediaFormat.KEY_LATENCY, 1);
+            // Splash "traffic jam" mitigation (solutions 1+2): the 374KB
+            // I frame of the splash animation stalls the encoder (input
+            // Surface queue backlog, delayDelta up to ~317ms). Low-latency
+            // mode speeds up single-frame encoding; a coarser I-frame QP
+            // makes the I frame smaller (374 -> ~150-200KB) so it encodes
+            // faster. Both are ignored silently by encoders that do not
+            // support them.
+            format.setInteger(MediaFormat.KEY_LOW_LATENCY, 1);
+            format.setInteger("i-frame-qp", 32);
+
         }
         if (maxFps > 0) {
             // The key existed privately before Android 10:

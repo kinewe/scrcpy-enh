@@ -4,6 +4,8 @@
 #include <string.h>
 #include <SDL3/SDL.h>
 #ifdef _WIN32
+#include <stdio.h>
+#include <stdlib.h>
 #include <windows.h>
 #endif
 
@@ -986,6 +988,55 @@ sc_screen_apply_frame(struct sc_screen *screen, bool can_resize) {
     return true;
 }
 
+#ifdef _WIN32
+// Absolute-latency measurement: log (wall clock ms, frame pts us) for
+// every rendered frame to %%TEMP%%\\scrcpy_frame_log.txt (overwritten on
+// each scrcpy start, unbuffered so data survives hard kills). The
+// analysis script pairs screen pulse detections with the nearest frame
+// and converts pts to device epoch ms via adb clock calibration.
+static FILE *g_frame_log;
+static void
+frame_log_open(void) {
+    if (g_frame_log) {
+        return;
+    }
+    const char *tmp = getenv("TEMP");
+    char path[MAX_PATH];
+    if (tmp) {
+        snprintf(path, sizeof(path), "%s\\scrcpy_frame_log.txt", tmp);
+    } else {
+        snprintf(path, sizeof(path), "scrcpy_frame_log.txt");
+    }
+    g_frame_log = fopen(path, "w");
+    if (g_frame_log) {
+        setvbuf(g_frame_log, NULL, _IONBF, 0);
+    }
+}
+
+static int64_t
+unix_ms_now(void) {
+    FILETIME ft;
+    GetSystemTimeAsFileTime(&ft);
+    ULARGE_INTEGER ul;
+    ul.LowPart = ft.dwLowDateTime;
+    ul.HighPart = ft.dwHighDateTime;
+    return (int64_t) ((ul.QuadPart - 116444736000000000ULL) / 10000);
+}
+
+static void
+frame_log_write(int64_t pts_us) {
+    if (pts_us < 0) {
+        return; // no pts (AV_NOPTS_VALUE)
+    }
+    frame_log_open();
+    if (g_frame_log) {
+        // 2 columns: wall_ms(render), pts_us(device)
+        fprintf(g_frame_log, "%lld,%lld\n", (long long) unix_ms_now(),
+                (long long) pts_us);
+    }
+}
+#endif
+
 static bool
 sc_screen_update_frame(struct sc_screen *screen) {
     assert(screen->video);
@@ -1012,6 +1063,9 @@ sc_screen_update_frame(struct sc_screen *screen) {
     // read with lock held
     bool can_resize = !screen->prevent_auto_resize;
     sc_mutex_unlock(&screen->mutex);
+#ifdef _WIN32
+    frame_log_write(screen->frame->pts);
+#endif
     return sc_screen_apply_frame(screen, can_resize);
 }
 

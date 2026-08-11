@@ -5,6 +5,9 @@ import com.genymobile.scrcpy.model.Codec;
 import com.genymobile.scrcpy.util.IO;
 
 import android.media.MediaCodec;
+import android.system.ErrnoException;
+import android.system.Os;
+import android.system.OsConstants;
 
 import java.io.FileDescriptor;
 import java.io.IOException;
@@ -30,6 +33,15 @@ public final class Streamer {
         this.codec = codec;
         this.sendStreamMeta = sendCodecMeta;
         this.sendFrameMeta = sendFrameMeta;
+        // Enlarge the socket send buffer (default ~208KB on Android) so
+        // encoder bursts (large frames ~200KB at 120fps) are absorbed by
+        // the kernel instead of blocking the encoder thread and queueing
+        // frames. Non-fatal if the platform rejects it.
+        try {
+            Os.setsockoptInt(fd, OsConstants.SOL_SOCKET, OsConstants.SO_SNDBUF, 1 << 20);
+        } catch (ErrnoException ignored) {
+            // keep the default buffer
+        }
     }
 
     public Codec getCodec() {
