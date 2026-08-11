@@ -32,7 +32,7 @@ set "FALLBACK_CONFIG=%SCRIPT_DIR%..\..\config.txt"
 
 rem ----- 串流参数：有线 USB 带宽充足用高规格；无线带宽有限保持低延迟 -----
 rem 有线规格：动态分配（:detect_display_spec 读取设备分辨率/刷新率后覆盖），此值为读取失败时的保底默认
-set "USB_ARGS=--keyboard=uhid --video-codec=h264 --video-bit-rate=50M --max-size 2560 --max-fps 120 --video-codec-options="max-b-frames:int=0,bitrate-mode:int=1,i-frame-interval:int=1" --render-driver=direct3d --video-buffer=0"
+set "USB_ARGS=--keyboard=uhid --video-codec=h264 --video-bit-rate=50M --max-size 2560 --max-fps 120 --video-codec-options="max-b-frames:int=0,bitrate-mode:int=1" --render-driver=direct3d --video-buffer=0"
 set "WIFI_ARGS=--keyboard=uhid --video-codec=h264 --video-bit-rate=15M --max-size 1920 --max-fps 60"
 
 rem ===== 自动切换投屏模式参数（与 手机投屏.bat 同步）=====
@@ -209,7 +209,7 @@ if not defined DEV_FPS set "DEV_FPS=60"
 for /f "tokens=1 delims=." %%a in ("!DEV_FPS!") do set "DEV_FPS=%%a"
 if not defined DEV_H (
     rem 读取/解析失败：回退默认有线规格
-    set "USB_ARGS=--keyboard=uhid --video-codec=h264 --video-bit-rate=50M --max-size 2560 --max-fps 120 --video-codec-options="max-b-frames:int=0,bitrate-mode:int=1,i-frame-interval:int=1" --render-driver=direct3d --video-buffer=0"
+    set "USB_ARGS=--keyboard=uhid --video-codec=h264 --video-bit-rate=50M --max-size 2560 --max-fps 120 --video-codec-options="max-b-frames:int=0,bitrate-mode:int=1" --render-driver=direct3d --video-buffer=0"
     set "SPEC_INFO=设备规格读取失败，使用默认规格 h264/50M/2560/120fps"
     exit /b 0
 )
@@ -226,7 +226,7 @@ set /a "BR=!BR!*15"
 if !BR! LSS 15 set "BR=15"
 if !BR! GTR 80 set "BR=80"
 set "USB_BITRATE=!BR!M"
-set "USB_ARGS=--keyboard=uhid --video-codec=h264 --video-bit-rate=!USB_BITRATE! --max-size !MAX_SIZE! --max-fps !DEV_FPS! --video-codec-options="max-b-frames:int=0,bitrate-mode:int=1,i-frame-interval:int=1" --render-driver=direct3d --video-buffer=0"
+set "USB_ARGS=--keyboard=uhid --video-codec=h264 --video-bit-rate=!USB_BITRATE! --max-size !MAX_SIZE! --max-fps !DEV_FPS! --video-codec-options="max-b-frames:int=0,bitrate-mode:int=1" --render-driver=direct3d --video-buffer=0"
 set "SPEC_INFO=检测到设备 !DEV_W!x!DEV_H!@!DEV_FPS!Hz，有线规格 h264/!USB_BITRATE!/!MAX_SIZE!/!DEV_FPS!fps"
 exit /b 0
 

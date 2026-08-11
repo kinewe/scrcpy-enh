@@ -49,6 +49,7 @@ public class ScreenCapture extends SurfaceCapture {
 
     private AffineMatrix transform;
     private OpenGLRunner glRunner;
+    private int currentTargetFps; // replayed onto a fresh glRunner after a restart
 
     public ScreenCapture(VirtualDisplayListener vdListener, Options options) {
         this.vdListener = vdListener;
@@ -124,6 +125,7 @@ public class ScreenCapture extends SurfaceCapture {
             OpenGLFilter glFilter = new AffineOpenGLFilter(transform);
             glRunner = new OpenGLRunner(glFilter);
             surface = glRunner.start(inputSize, videoSize, surface);
+            glRunner.setTargetFps(currentTargetFps);
         } else {
             // If there is no filter, the display must be rendered at target video size directly
             inputSize = videoSize;
@@ -175,6 +177,13 @@ public class ScreenCapture extends SurfaceCapture {
     }
 
     @Override
+    public void setTargetFps(int fps) {
+        currentTargetFps = fps;
+        if (glRunner != null) {
+            glRunner.setTargetFps(fps);
+        }
+    }
+
     public void stop() {
         if (glRunner != null) {
             glRunner.stopAndRelease();

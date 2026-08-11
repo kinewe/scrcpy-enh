@@ -27,6 +27,17 @@ public abstract class SurfaceCapture {
     }
 
     /**
+     * Set the capture frame-rate cap (ABR fps level). The default
+     * implementation does nothing; capture implementations that can thin
+     * frames without an encoder rebuild (e.g. the GL layer) override it.
+     *
+     * @param fps target fps (0 = no limit)
+     */
+    public void setTargetFps(int fps) {
+        // no-op by default
+    }
+
+    /**
      * Called once before the first capture starts.
      *
      * @param videoConstraints the video constraints
