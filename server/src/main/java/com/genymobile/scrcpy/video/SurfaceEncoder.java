@@ -811,14 +811,11 @@ public class SurfaceEncoder implements AsyncProcessor {
         } else {
             fpsRecoverOverloads = 0; // healthy/mild frames reset the debounce
         }
-        // fps-first sharing: once the bitrate buffer has conceded
-        // (currentBitRate < videoBitRate), a REAL overload (instant
-        // >=90ms) drops the fps level too — 90 shares the load with the
-        // bitrate (user: at 120fps the bitrate buffer alone cannot keep
-        // it responsive). Full-rate lone spikes (I frames, probeSensitive
-        // = false) still concede bitrate only.
-        if (probeSensitive && instantOverloadStreak >= ABR_FPS_INSTANT_STREAK
-                && currentBitRate < videoBitRate) {
+        // Fast-degrade path: a REAL overload (instant >=90ms) drops fps
+        // immediately — 120->60->30, no 90 mid-step (90 is the buffer
+        // partner, not a fast-path step). Lone I-frame spikes
+        // (probeSensitive = false) still concede bitrate only.
+        if (probeSensitive && instantOverloadStreak >= ABR_FPS_INSTANT_STREAK) {
             if (nowNs < fpsDropCooldownUntilNs) {
                 if (nowNs - abrFpsCooldownLogNs >= 1_000_000_000L) {
                     Ln.i("ABR: fps drop cooldown (draining old frames)");
@@ -859,6 +856,21 @@ public class SurfaceEncoder implements AsyncProcessor {
             if (exempt) {
                 return;
             }
+            // Buffer-mode fps share: whenever the bitrate buffer engages
+            // at full fps (120), drop to 90 together — 90 is the buffer
+            // partner (user: at 120fps the bitrate buffer alone cannot
+            // keep it responsive; only bitrate callbacks were seen, no 90
+            // step). No-op when fps is already below 120.
+            if (abrFps == ABR_FPS_LEVELS[0]) {
+                Ln.i("ABR: fps buffer 120->90 (shares bitrate load)");
+                capture.setTargetFps(90);
+                abrFps = 90;
+                fpsStableSinceNs = 0;
+                fpsProbeUntilNs = 0;
+                fpsProbeFrom = 0;
+                fpsDropCooldownUntilNs = nowNs + 300_000_000L;
+                abrLastDownNs = nowNs;
+            }
             lowerBitrate(codec, nowNs, gentle);
             return;
         }
@@ -875,14 +887,18 @@ public class SurfaceEncoder implements AsyncProcessor {
             }
             return;
         }
-        // Degrade now INCLUDES the 90 level: it shares the load with the
-        // bitrate under mild pressure (120->90->60->30). User: when 120 is
-        // maxed, bitrate buffering alone is not enough to stay responsive.
+        // Fast-degrade SKIPS the 90 buffer level (120->60->30 decisive).
+        // The 90 level exists ONLY as the bitrate-buffer partner (bitrate
+        // engages -> fps 120->90 together) and the smooth restore step
+        // (30->60->90->120). User: no 90 mid-step on the fast path.
         int nextIdx = idx + 1;
+        if (nextIdx + 1 < ABR_FPS_LEVELS.length && ABR_FPS_LEVELS[nextIdx] == 90) {
+            nextIdx++;
+        }
         int newFps = ABR_FPS_LEVELS[nextIdx];
         fpsProbeUntilNs = 0; // cancel any in-flight probe
         fpsProbeFrom = 0;
-        Ln.i("ABR: fps degrade " + abrFps + "->" + newFps + " (bitrate at floor, gl drop)");
+        Ln.i("ABR: fps degrade " + abrFps + "->" + newFps + " (fast path, gl drop)");
         capture.setTargetFps(newFps);
         abrFps = newFps;
         fpsStableSinceNs = 0;
