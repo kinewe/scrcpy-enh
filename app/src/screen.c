@@ -1493,9 +1493,29 @@ sc_screen_handle_event(struct sc_screen *screen, const SDL_Event *event) {
         }
     }
     if (event->type == SDL_EVENT_MOUSE_MOTION && screen->overlay_dragging) {
-        sc_fps_overlay_set_pos(&screen->fps_overlay,
-                               (int) event->motion.x - screen->overlay_drag_dx,
-                               (int) event->motion.y - screen->overlay_drag_dy);
+        int out_w;
+        int out_h;
+        if (!SDL_GetRenderOutputSize(screen->renderer, &out_w, &out_h)) {
+            return;
+        }
+        // Keep the whole widget inside the window: clamp the top-left
+        // corner to [0, out - tex] on both axes (user: dragging must not
+        // move the widget out of view).
+        int max_x = out_w - screen->fps_overlay.tex_w;
+        int max_y = out_h - screen->fps_overlay.tex_h;
+        int nx = (int) event->motion.x - screen->overlay_drag_dx;
+        int ny = (int) event->motion.y - screen->overlay_drag_dy;
+        if (nx < 0) {
+            nx = 0;
+        } else if (nx > max_x) {
+            nx = max_x;
+        }
+        if (ny < 0) {
+            ny = 0;
+        } else if (ny > max_y) {
+            ny = max_y;
+        }
+        sc_fps_overlay_set_pos(&screen->fps_overlay, nx, ny);
         sc_screen_render(screen, false);
         return;
     }
