@@ -823,6 +823,18 @@ aoa_complete:
         }
         screen_initialized = true;
 
+        // FPS overlay: connection mode (serial contains ':' for WIFI adb
+        // addresses like 192.168.x.x:5555, otherwise USB) and ABR state
+        // delivery registration. The receiver thread may already be
+        // running; ABR messages received before this registration are
+        // simply dropped by the receiver (overlay is null).
+        const char *overlay_serial = s->server.serial;
+        enum sc_overlay_mode overlay_mode = overlay_serial
+                && strchr(overlay_serial, ':')
+                ? SC_OVERLAY_MODE_WIFI : SC_OVERLAY_MODE_USB;
+        sc_fps_overlay_set_mode(&s->screen.fps_overlay, overlay_mode);
+        sc_receiver_set_abr_overlay(&s->screen.fps_overlay);
+
         if (options->video_playback) {
             struct sc_frame_source *src = &s->video_decoder.frame_source;
             if (options->video_buffer) {

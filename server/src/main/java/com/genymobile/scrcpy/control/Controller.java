@@ -199,6 +199,10 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
         this.surfaceCapture = surfaceCapture;
     }
 
+    public DeviceMessageSender getDeviceMessageSender() {
+        return sender;
+    }
+
     private UhidManager getUhidManager() {
         if (uhidManager == null) {
             int uhidDisplayId = displayId;

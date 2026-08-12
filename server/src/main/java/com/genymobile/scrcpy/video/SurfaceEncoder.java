@@ -3,6 +3,8 @@ package com.genymobile.scrcpy.video;
 import com.genymobile.scrcpy.AndroidVersions;
 import com.genymobile.scrcpy.AsyncProcessor;
 import com.genymobile.scrcpy.Options;
+import com.genymobile.scrcpy.control.DeviceMessage;
+import com.genymobile.scrcpy.control.DeviceMessageSender;
 import com.genymobile.scrcpy.device.Streamer;
 import com.genymobile.scrcpy.model.Codec;
 import com.genymobile.scrcpy.model.CodecOption;
@@ -170,6 +172,8 @@ public class SurfaceEncoder implements AsyncProcessor {
 
     private final SurfaceCapture capture;
     private final Streamer streamer;
+    private final DeviceMessageSender deviceMessageSender;
+    private long lastAbrMsgNs;
     private final String encoderName;
     private final List<CodecOption> codecOptions;
     private final int videoBitRate;
@@ -189,9 +193,11 @@ public class SurfaceEncoder implements AsyncProcessor {
 
     private VideoConstraints videoConstraints;
 
-    public SurfaceEncoder(SurfaceCapture capture, Streamer streamer, Options options) {
+    public SurfaceEncoder(SurfaceCapture capture, Streamer streamer, Options options,
+            DeviceMessageSender deviceMessageSender) {
         this.capture = capture;
         this.streamer = streamer;
+        this.deviceMessageSender = deviceMessageSender;
         this.videoBitRate = options.getVideoBitRate();
         this.maxSize = options.getMaxSize();
         this.maxFps = options.getMaxFps();
@@ -510,6 +516,15 @@ public class SurfaceEncoder implements AsyncProcessor {
                                     + " delayDelta=" + fdelay + "ms size="
                                     + (bufferInfo.size / 1024) + "KB");
                             frameLogLastNs = nowNs;
+                        }
+                        // ABR state report to the client overlay (bitrate +
+                        // fps level), 500ms. The sender is null in non-display
+                        // scenarios (e.g. camera), so guard against it.
+                        if (deviceMessageSender != null
+                                && nowNs - lastAbrMsgNs >= 500_000_000L) {
+                            lastAbrMsgNs = nowNs;
+                            deviceMessageSender.send(
+                                    DeviceMessage.createAbrState(currentBitRate, abrFps));
                         }
                     }
 

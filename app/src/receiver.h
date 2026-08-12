@@ -10,6 +10,8 @@
 #include "util/net.h"
 #include "util/thread.h"
 
+struct sc_fps_overlay; // forward declaration (see fps_overlay.h)
+
 // receive events from the device
 // managed by the controller
 struct sc_receiver {
@@ -42,5 +44,11 @@ sc_receiver_start(struct sc_receiver *receiver);
 
 void
 sc_receiver_join(struct sc_receiver *receiver);
+
+// Register the fps overlay to receive ABR state updates (called from the
+// main thread after the screen is created; may be called before the
+// receiver thread starts delivering ABR messages).
+void
+sc_receiver_set_abr_overlay(struct sc_fps_overlay *overlay);
 
 #endif

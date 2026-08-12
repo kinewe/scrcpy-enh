@@ -151,7 +151,8 @@ public final class Server {
                 } else {
                     surfaceCapture = new CameraCapture(options);
                 }
-                SurfaceEncoder surfaceEncoder = new SurfaceEncoder(surfaceCapture, videoStreamer, options);
+                SurfaceEncoder surfaceEncoder = new SurfaceEncoder(surfaceCapture, videoStreamer, options,
+                        controller != null ? controller.getDeviceMessageSender() : null);
                 asyncProcessors.add(surfaceEncoder);
 
                 if (controller != null) {

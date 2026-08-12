@@ -110,6 +110,14 @@ sc_device_msg_deserialize(const uint8_t *buf, size_t len,
 
             return 9 + mimetype_len + data_len;
         }
+        case DEVICE_MSG_TYPE_ABR_STATE: {
+            if (len < 9) {
+                return 0; // no complete message (TCP fragmentation)
+            }
+            msg->abr_state.bitrate = (uint32_t) buf[1] << 24 | buf[2] << 16 | buf[3] << 8 | buf[4];
+            msg->abr_state.fps = (uint32_t) buf[5] << 24 | buf[6] << 16 | buf[7] << 8 | buf[8];
+            return 9;
+        }
         default:
             LOGW("Unknown device message type: %d", (int) msg->type);
             return -1; // error, we cannot recover

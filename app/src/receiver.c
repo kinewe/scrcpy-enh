@@ -8,10 +8,22 @@
 
 #include "device_msg.h"
 #include "events.h"
+#include "fps_overlay.h"
 #include "input_manager.h"
 #include "util/log.h"
 #include "util/str.h"
 #include "util/thread.h"
+
+// ABR state delivery target: registered from the main thread in scrcpy.c
+// after the screen (and its fps overlay) is created. The receiver thread
+// may start before the registration, in which case ABR messages are
+// dropped until the overlay is available (null check below).
+static struct sc_fps_overlay *g_abr_overlay;
+
+void
+sc_receiver_set_abr_overlay(struct sc_fps_overlay *overlay) {
+    g_abr_overlay = overlay;
+}
 
 struct sc_uhid_output_task_data {
     struct sc_uhid_devices *uhid_devices;
@@ -147,6 +159,18 @@ task_uhid_output(void *userdata) {
 }
 
 static void
+task_set_abr_state(void *userdata) {
+    assert(sc_thread_is_main());
+
+    struct sc_device_msg *msg = userdata;
+    if (g_abr_overlay) {
+        sc_fps_overlay_update_abr(g_abr_overlay, msg->abr_state.bitrate,
+                                  msg->abr_state.fps);
+    }
+    free(msg);
+}
+
+static void
 process_msg(struct sc_receiver *receiver, struct sc_device_msg *msg) {
     switch (msg->type) {
         case DEVICE_MSG_TYPE_CLIPBOARD: {
@@ -262,6 +286,22 @@ process_msg(struct sc_receiver *receiver, struct sc_device_msg *msg) {
             }
 
             break;
+        case DEVICE_MSG_TYPE_ABR_STATE: {
+            // Create a copy of the message to send to the main thread
+            // (shallow copy: abr_state has no heap pointers, so the copy
+            // owns nothing and is freed by the main-thread task)
+            struct sc_device_msg *msg_copy = malloc(sizeof(struct sc_device_msg));
+            if (!msg_copy) {
+                LOG_OOM();
+                return;
+            }
+            *msg_copy = *msg; // shallow copy (no heap pointers, safe)
+            bool ok = sc_run_on_main_thread(task_set_abr_state, msg_copy, true);
+            if (!ok) {
+                free(msg_copy);
+            }
+            break;
+        }
     }
 }
 

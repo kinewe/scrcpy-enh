@@ -8,8 +8,9 @@
 
 // 5x7 dot-matrix font: one uint8_t per row, 5 bits per row, least
 // significant bit on the right. Index: 0-9 are the digits, then
-// 10='f', 11='p', 12='s'.
-static const uint8_t FONT[13][7] = {
+// 10='f', 11='p', 12='s', 13='M', 14='k', 15='U', 16='B', 17='W',
+// 18='I', 19='F', 20=' ' (space).
+static const uint8_t FONT[21][7] = {
     {0x0E, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0E}, // 0
     {0x04, 0x0C, 0x04, 0x04, 0x04, 0x04, 0x0E}, // 1
     {0x0E, 0x11, 0x01, 0x02, 0x04, 0x08, 0x1F}, // 2
@@ -23,6 +24,14 @@ static const uint8_t FONT[13][7] = {
     {0x06, 0x09, 0x08, 0x1E, 0x08, 0x08, 0x08}, // f
     {0x1E, 0x11, 0x11, 0x1E, 0x10, 0x10, 0x10}, // p
     {0x0F, 0x10, 0x10, 0x0E, 0x01, 0x01, 0x1E}, // s
+    {0x11, 0x1B, 0x15, 0x15, 0x11, 0x11, 0x11}, // M
+    {0x08, 0x08, 0x08, 0x08, 0x08, 0x0A, 0x04}, // k
+    {0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E}, // U
+    {0x1E, 0x11, 0x11, 0x1E, 0x11, 0x11, 0x1E}, // B
+    {0x11, 0x11, 0x11, 0x15, 0x15, 0x1B, 0x11}, // W
+    {0x1F, 0x04, 0x04, 0x04, 0x04, 0x04, 0x1F}, // I
+    {0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x10}, // F
+    {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}, // ' '
 };
 
 #define FONT_SCALE 3
@@ -46,6 +55,22 @@ glyph_of(char c) {
             return 11;
         case 's':
             return 12;
+        case 'M':
+            return 13;
+        case 'k':
+            return 14;
+        case 'U':
+            return 15;
+        case 'B':
+            return 16;
+        case 'W':
+            return 17;
+        case 'I':
+            return 18;
+        case 'F':
+            return 19;
+        case ' ':
+            return 20;
         default:
             return -1;
     }
@@ -132,6 +157,9 @@ sc_fps_overlay_init(struct sc_fps_overlay *overlay, SDL_Renderer *renderer) {
     overlay->frame_count = 0;
     overlay->last_tick = sc_tick_now();
     overlay->fps = 0;
+    overlay->bitrate = 0;
+    overlay->abr_dirty = false;
+    overlay->mode = SC_OVERLAY_MODE_USB;
 
     return render_text(overlay, "0fps");
 }
@@ -142,6 +170,27 @@ sc_fps_overlay_destroy(struct sc_fps_overlay *overlay) {
         SDL_DestroyTexture(overlay->texture);
         overlay->texture = NULL;
     }
+}
+
+void
+sc_fps_overlay_set_mode(struct sc_fps_overlay *overlay,
+                        enum sc_overlay_mode mode) {
+    if (overlay->mode == mode) {
+        return;
+    }
+    overlay->mode = mode;
+    overlay->abr_dirty = true;
+}
+
+void
+sc_fps_overlay_update_abr(struct sc_fps_overlay *overlay, int bitrate,
+                          int fps) {
+    (void) fps; // reserved for future use, not displayed
+    if (overlay->bitrate == bitrate) {
+        return;
+    }
+    overlay->bitrate = bitrate;
+    overlay->abr_dirty = true;
 }
 
 void
@@ -162,13 +211,22 @@ sc_fps_overlay_on_frame(struct sc_fps_overlay *overlay) {
     overlay->frame_count = 0;
     overlay->last_tick = now;
 
-    if (fps == overlay->fps) {
+    if (fps == overlay->fps && !overlay->abr_dirty) {
         return;
     }
     overlay->fps = fps;
+    overlay->abr_dirty = false;
 
-    char text[16];
-    snprintf(text, sizeof(text), "%dfps", fps);
+    // "<fps>fps <bitrate><unit> <mode>" e.g. "60fps 15M USB"
+    const char *mode = overlay->mode == SC_OVERLAY_MODE_WIFI ? "WIFI" : "USB";
+    char text[32];
+    if (overlay->bitrate >= 1000000) {
+        snprintf(text, sizeof(text), "%dfps %dM %s", fps,
+                 overlay->bitrate / 1000000, mode);
+    } else {
+        snprintf(text, sizeof(text), "%dfps %dk %s", fps,
+                 overlay->bitrate / 1000, mode);
+    }
     // on failure the previous texture is kept
     render_text(overlay, text);
 }

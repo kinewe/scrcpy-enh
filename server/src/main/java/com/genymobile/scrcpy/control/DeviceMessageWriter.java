@@ -59,6 +59,10 @@ public class DeviceMessageWriter {
                 dos.write(mimeTypeBytes);
                 dos.write(imageData);
                 break;
+            case DeviceMessage.TYPE_ABR_STATE:
+                dos.writeInt(msg.getBitrate());
+                dos.writeInt(msg.getAbrFps());
+                break;
             default:
                 throw new ControlProtocolException("Unknown event type: " + type);
         }

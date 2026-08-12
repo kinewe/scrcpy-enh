@@ -16,6 +16,7 @@ enum sc_device_msg_type {
     DEVICE_MSG_TYPE_ACK_CLIPBOARD,
     DEVICE_MSG_TYPE_UHID_OUTPUT,
     DEVICE_MSG_TYPE_IMAGE_CLIPBOARD,
+    DEVICE_MSG_TYPE_ABR_STATE,
 };
 
 struct sc_device_msg {
@@ -37,6 +38,10 @@ struct sc_device_msg {
             uint32_t size;
             char *mimetype; // owned, to be freed by free()
         } image_clipboard;
+        struct {
+            uint32_t bitrate;
+            uint32_t fps;
+        } abr_state;
     };
 };
 
