@@ -22,6 +22,8 @@ struct sc_fps_overlay {
     int abr_fps;               // ABR target fps level (server-reported)
     bool abr_dirty;            // bitrate or mode changed, re-render needed
     enum sc_overlay_mode mode; // connection mode: USB or WIFI
+    int pos_x;                 // overlay top-left x (logical coords), -1 = default top-right
+    int pos_y;                 // overlay top-left y (logical coords), -1 = default top-right
 };
 
 bool sc_fps_overlay_init(struct sc_fps_overlay *overlay, SDL_Renderer *renderer);
@@ -37,5 +39,10 @@ void sc_fps_overlay_set_mode(struct sc_fps_overlay *overlay,
 // marks dirty
 void sc_fps_overlay_update_abr(struct sc_fps_overlay *overlay, int bitrate,
                                int fps);
+// get the current overlay position (resolves -1 to the default top-right)
+void sc_fps_overlay_get_pos(struct sc_fps_overlay *overlay, int out_w,
+                            int *x, int *y);
+// set the overlay position (user: Alt+drag to reposition)
+void sc_fps_overlay_set_pos(struct sc_fps_overlay *overlay, int x, int y);
 
 #endif

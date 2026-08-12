@@ -55,6 +55,11 @@ struct sc_screen {
     struct sc_fps_counter fps_counter;
     struct sc_fps_overlay fps_overlay;
 
+    // Alt+left-drag repositions the fps overlay (grab offset = mouse - origin)
+    bool overlay_dragging;
+    int overlay_drag_dx;
+    int overlay_drag_dy;
+
     struct sc_mutex mutex;
     struct sc_frame_buffer fb; // protected by mutex
     // When true, a frame size change must not cause the window to be resized

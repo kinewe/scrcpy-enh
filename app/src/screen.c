@@ -1475,6 +1475,35 @@ sc_screen_handle_event(struct sc_screen *screen, const SDL_Event *event) {
             return;
     }
 
+    // Alt+left-drag repositions the fps overlay (user: hold Alt and drag
+    // the corner widget to move it; the event is consumed, not injected).
+    if (event->type == SDL_EVENT_MOUSE_BUTTON_DOWN
+            && event->button.button == SDL_BUTTON_LEFT
+            && (SDL_GetModState() & SDL_KMOD_ALT)) {
+        int out_w;
+        int out_h;
+        if (SDL_GetRenderOutputSize(screen->renderer, &out_w, &out_h)) {
+            int ox;
+            int oy;
+            sc_fps_overlay_get_pos(&screen->fps_overlay, out_w, &ox, &oy);
+            screen->overlay_dragging = true;
+            screen->overlay_drag_dx = (int) event->button.x - ox;
+            screen->overlay_drag_dy = (int) event->button.y - oy;
+            return;
+        }
+    }
+    if (event->type == SDL_EVENT_MOUSE_MOTION && screen->overlay_dragging) {
+        sc_fps_overlay_set_pos(&screen->fps_overlay,
+                               (int) event->motion.x - screen->overlay_drag_dx,
+                               (int) event->motion.y - screen->overlay_drag_dy);
+        sc_screen_render(screen, false);
+        return;
+    }
+    if (event->type == SDL_EVENT_MOUSE_BUTTON_UP && screen->overlay_dragging) {
+        screen->overlay_dragging = false;
+        return;
+    }
+
     if (sc_screen_is_relative_mode(screen)
             && sc_mouse_capture_handle_event(&screen->mc, event)) {
         // The mouse capture handler consumed the event

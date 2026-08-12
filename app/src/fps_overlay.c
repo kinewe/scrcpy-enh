@@ -9,7 +9,7 @@
 // 5x7 dot-matrix font: one uint8_t per row, 5 bits per row, least
 // significant bit on the right. Index: 0-9 are the digits, then
 // 10='f', 11='p', 12='s', 13='M', 14='k', 15='U', 16='B', 17='W',
-// 18='I', 19='F', 20=' ' (space), 21='/'.
+// 18='I', 19='F', 20=' ' (space), 21='/' (rendered as '·').
 static const uint8_t FONT[22][7] = {
     {0x0E, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0E}, // 0
     {0x04, 0x0C, 0x04, 0x04, 0x04, 0x04, 0x0E}, // 1
@@ -32,14 +32,14 @@ static const uint8_t FONT[22][7] = {
     {0x1F, 0x04, 0x04, 0x04, 0x04, 0x04, 0x1F}, // I
     {0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x10}, // F
     {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}, // ' '
-    {0x08, 0x04, 0x04, 0x04, 0x04, 0x04, 0x02}, // '/' (top-left to bottom-right)
+    {0x00, 0x00, 0x0E, 0x0E, 0x0E, 0x00, 0x00}, // '·' middle dot (nicer divider)
 };
 
 #define FONT_SCALE 3
 #define FONT_CHAR_W 5
 #define FONT_CHAR_H 7
 #define FONT_SPACING 2
-#define OVERLAY_MARGIN_RIGHT 100
+#define OVERLAY_MARGIN_RIGHT 180
 #define OVERLAY_MARGIN_TOP 10
 #define OVERLAY_PADDING 6
 #define FPS_UPDATE_INTERVAL SC_TICK_FROM_MS(500)
@@ -165,6 +165,8 @@ sc_fps_overlay_init(struct sc_fps_overlay *overlay, SDL_Renderer *renderer) {
     overlay->abr_fps = 0;
     overlay->abr_dirty = false;
     overlay->mode = SC_OVERLAY_MODE_USB;
+    overlay->pos_x = -1;
+    overlay->pos_y = -1;
 
     return render_text(overlay, "0fps");
 }
@@ -175,6 +177,24 @@ sc_fps_overlay_destroy(struct sc_fps_overlay *overlay) {
         SDL_DestroyTexture(overlay->texture);
         overlay->texture = NULL;
     }
+}
+
+void
+sc_fps_overlay_get_pos(struct sc_fps_overlay *overlay, int out_w, int *x,
+                       int *y) {
+    if (overlay->pos_x < 0) {
+        *x = out_w - overlay->tex_w - OVERLAY_MARGIN_RIGHT;
+        *y = OVERLAY_MARGIN_TOP;
+    } else {
+        *x = overlay->pos_x;
+        *y = overlay->pos_y;
+    }
+}
+
+void
+sc_fps_overlay_set_pos(struct sc_fps_overlay *overlay, int x, int y) {
+    overlay->pos_x = x;
+    overlay->pos_y = y;
 }
 
 void
@@ -263,10 +283,11 @@ sc_fps_overlay_draw(struct sc_fps_overlay *overlay, SDL_Renderer *renderer) {
         return;
     }
 
-    // top-right corner: texture at (out_w - tex_w - 10, 10) with a
+    // top-right corner by default, or the user-set position (Alt+drag);
     // semi-transparent black background extended by 6px on each side
-    int tex_x = out_w - overlay->tex_w - OVERLAY_MARGIN_RIGHT;
-    int tex_y = OVERLAY_MARGIN_TOP;
+    int tex_x;
+    int tex_y;
+    sc_fps_overlay_get_pos(overlay, out_w, &tex_x, &tex_y);
 
     SDL_FRect bg_rect = {
         .x = tex_x - OVERLAY_PADDING,
