@@ -9,8 +9,8 @@
 // 5x7 dot-matrix font: one uint8_t per row, 5 bits per row, least
 // significant bit on the right. Index: 0-9 are the digits, then
 // 10='f', 11='p', 12='s', 13='M', 14='k', 15='U', 16='B', 17='W',
-// 18='I', 19='F', 20=' ' (space).
-static const uint8_t FONT[21][7] = {
+// 18='I', 19='F', 20=' ' (space), 21='/'.
+static const uint8_t FONT[22][7] = {
     {0x0E, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0E}, // 0
     {0x04, 0x0C, 0x04, 0x04, 0x04, 0x04, 0x0E}, // 1
     {0x0E, 0x11, 0x01, 0x02, 0x04, 0x08, 0x1F}, // 2
@@ -32,13 +32,15 @@ static const uint8_t FONT[21][7] = {
     {0x1F, 0x04, 0x04, 0x04, 0x04, 0x04, 0x1F}, // I
     {0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x10}, // F
     {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}, // ' '
+    {0x08, 0x04, 0x04, 0x04, 0x04, 0x04, 0x02}, // '/' (top-left to bottom-right)
 };
 
 #define FONT_SCALE 3
 #define FONT_CHAR_W 5
 #define FONT_CHAR_H 7
 #define FONT_SPACING 2
-#define OVERLAY_MARGIN 10
+#define OVERLAY_MARGIN_RIGHT 100
+#define OVERLAY_MARGIN_TOP 10
 #define OVERLAY_PADDING 6
 #define FPS_UPDATE_INTERVAL SC_TICK_FROM_MS(500)
 
@@ -71,6 +73,8 @@ glyph_of(char c) {
             return 19;
         case ' ':
             return 20;
+        case '/':
+            return 21;
         default:
             return -1;
     }
@@ -158,6 +162,7 @@ sc_fps_overlay_init(struct sc_fps_overlay *overlay, SDL_Renderer *renderer) {
     overlay->last_tick = sc_tick_now();
     overlay->fps = 0;
     overlay->bitrate = 0;
+    overlay->abr_fps = 0;
     overlay->abr_dirty = false;
     overlay->mode = SC_OVERLAY_MODE_USB;
 
@@ -185,11 +190,11 @@ sc_fps_overlay_set_mode(struct sc_fps_overlay *overlay,
 void
 sc_fps_overlay_update_abr(struct sc_fps_overlay *overlay, int bitrate,
                           int fps) {
-    (void) fps; // reserved for future use, not displayed
-    if (overlay->bitrate == bitrate) {
+    if (overlay->bitrate == bitrate && overlay->abr_fps == fps) {
         return;
     }
     overlay->bitrate = bitrate;
+    overlay->abr_fps = fps;
     overlay->abr_dirty = true;
 }
 
@@ -217,15 +222,28 @@ sc_fps_overlay_on_frame(struct sc_fps_overlay *overlay) {
     overlay->fps = fps;
     overlay->abr_dirty = false;
 
-    // "<fps>fps <bitrate><unit> <mode>" e.g. "60fps 15M USB"
+    // "<fps>fps[/<abr_fps>] <bitrate><unit> <mode>"
+    // e.g. "60/60fps 15M USB", "60fps 15M USB" (before ABR state)
     const char *mode = overlay->mode == SC_OVERLAY_MODE_WIFI ? "WIFI" : "USB";
     char text[32];
     if (overlay->bitrate >= 1000000) {
-        snprintf(text, sizeof(text), "%dfps %dM %s", fps,
-                 overlay->bitrate / 1000000, mode);
+        if (overlay->abr_fps > 0) {
+            snprintf(text, sizeof(text), "%d/%dfps %dM %s", fps,
+                     overlay->abr_fps, overlay->bitrate / 1000000, mode);
+        } else {
+            // ABR state not received yet: show actual fps only
+            snprintf(text, sizeof(text), "%dfps %dM %s", fps,
+                     overlay->bitrate / 1000000, mode);
+        }
     } else {
-        snprintf(text, sizeof(text), "%dfps %dk %s", fps,
-                 overlay->bitrate / 1000, mode);
+        if (overlay->abr_fps > 0) {
+            snprintf(text, sizeof(text), "%d/%dfps %dk %s", fps,
+                     overlay->abr_fps, overlay->bitrate / 1000, mode);
+        } else {
+            // ABR state not received yet: show actual fps only
+            snprintf(text, sizeof(text), "%dfps %dk %s", fps,
+                     overlay->bitrate / 1000, mode);
+        }
     }
     // on failure the previous texture is kept
     render_text(overlay, text);
@@ -247,8 +265,8 @@ sc_fps_overlay_draw(struct sc_fps_overlay *overlay, SDL_Renderer *renderer) {
 
     // top-right corner: texture at (out_w - tex_w - 10, 10) with a
     // semi-transparent black background extended by 6px on each side
-    int tex_x = out_w - overlay->tex_w - OVERLAY_MARGIN;
-    int tex_y = OVERLAY_MARGIN;
+    int tex_x = out_w - overlay->tex_w - OVERLAY_MARGIN_RIGHT;
+    int tex_y = OVERLAY_MARGIN_TOP;
 
     SDL_FRect bg_rect = {
         .x = tex_x - OVERLAY_PADDING,

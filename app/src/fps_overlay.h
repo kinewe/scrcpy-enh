@@ -19,6 +19,7 @@ struct sc_fps_overlay {
     uint64_t last_tick;        // last update time (sc_tick)
     int fps;                   // currently displayed fps
     int bitrate;               // current ABR bitrate (server-reported)
+    int abr_fps;               // ABR target fps level (server-reported)
     bool abr_dirty;            // bitrate or mode changed, re-render needed
     enum sc_overlay_mode mode; // connection mode: USB or WIFI
 };
@@ -32,8 +33,8 @@ void sc_fps_overlay_draw(struct sc_fps_overlay *overlay, SDL_Renderer *renderer)
 // set the connection mode shown in the overlay (USB / WIFI); marks dirty
 void sc_fps_overlay_set_mode(struct sc_fps_overlay *overlay,
                              enum sc_overlay_mode mode);
-// update the ABR bitrate from a server ABR state message; marks dirty
-// (the fps parameter is stored for future use, not displayed)
+// update the ABR bitrate and target fps from a server ABR state message;
+// marks dirty
 void sc_fps_overlay_update_abr(struct sc_fps_overlay *overlay, int bitrate,
                                int fps);
 
