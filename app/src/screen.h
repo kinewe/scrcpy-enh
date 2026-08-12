@@ -14,6 +14,7 @@
 #include "coords.h"
 #include "disconnect.h"
 #include "fps_counter.h"
+#include "fps_overlay.h"
 #include "frame_buffer.h"
 #include "input_manager.h"
 #include "mouse_capture.h"
@@ -52,6 +53,7 @@ struct sc_screen {
     struct sc_input_manager im;
     struct sc_mouse_capture mc; // only used in mouse relative mode
     struct sc_fps_counter fps_counter;
+    struct sc_fps_overlay fps_overlay;
 
     struct sc_mutex mutex;
     struct sc_frame_buffer fb; // protected by mutex

@@ -10,6 +10,7 @@
 #endif
 
 #include "events.h"
+#include "fps_overlay.h"
 #include "icon.h"
 #include "options.h"
 #include "util/log.h"
@@ -311,6 +312,7 @@ sc_screen_render(struct sc_screen *screen, bool update_content_rect) {
     }
 
 end:
+    sc_fps_overlay_draw(&screen->fps_overlay, renderer);
     sc_sdl_render_present(renderer);
 }
 
@@ -630,6 +632,11 @@ sc_screen_init(struct sc_screen *screen,
         goto error_destroy_renderer;
     }
 
+    if (!sc_fps_overlay_init(&screen->fps_overlay, screen->renderer)) {
+        // not fatal, the overlay is a nice-to-have
+        LOGW("Could not initialize FPS overlay");
+    }
+
     ok = SDL_StartTextInput(screen->window);
     if (!ok) {
         LOGE("Could not enable text input: %s", SDL_GetError());
@@ -830,6 +837,7 @@ sc_screen_destroy(struct sc_screen *screen) {
         sc_disconnect_destroy(&screen->disconnect);
     }
     sc_texture_destroy(&screen->tex);
+    sc_fps_overlay_destroy(&screen->fps_overlay);
     av_frame_free(&screen->frame);
 #ifdef SC_DISPLAY_FORCE_OPENGL_CORE_PROFILE
     SDL_GL_DestroyContext(screen->gl_context);
@@ -952,6 +960,7 @@ sc_screen_apply_frame(struct sc_screen *screen, bool can_resize) {
     assert(screen->window_shown);
 
     sc_fps_counter_add_rendered_frame(&screen->fps_counter);
+    sc_fps_overlay_on_frame(&screen->fps_overlay);
 
     AVFrame *frame = screen->frame;
     struct sc_size new_frame_size = {frame->width, frame->height};
