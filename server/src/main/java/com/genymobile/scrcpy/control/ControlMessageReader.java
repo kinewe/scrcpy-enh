@@ -11,7 +11,11 @@ import java.nio.charset.StandardCharsets;
 
 public class ControlMessageReader {
 
-    private static final int MESSAGE_MAX_SIZE = 1 << 18; // 256k
+    // Control messages have no fixed size cap here: the image clipboard
+    // message size is read from the message length field (the client limits
+    // it to SC_CONTROL_MSG_MAX_SIZE = 256M, see app/src/control_msg.h).
+    // This constant only caps CLIPBOARD_TEXT_MAX_LENGTH below.
+    private static final int MESSAGE_MAX_SIZE = 1 << 18; // 256K
 
     public static final int CLIPBOARD_TEXT_MAX_LENGTH = MESSAGE_MAX_SIZE - 14; // type: 1 byte; sequence: 8 bytes; paste flag: 1 byte; length: 4 bytes
     public static final int INJECT_TEXT_MAX_LENGTH = 300;

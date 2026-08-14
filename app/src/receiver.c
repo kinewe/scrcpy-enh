@@ -191,6 +191,7 @@ process_msg(struct sc_receiver *receiver, struct sc_device_msg *msg) {
             struct sc_device_msg *msg_copy = malloc(sizeof(struct sc_device_msg));
             if (!msg_copy) {
                 LOG_OOM();
+                sc_device_msg_destroy(msg);
                 return;
             }
 
@@ -199,6 +200,7 @@ process_msg(struct sc_receiver *receiver, struct sc_device_msg *msg) {
             if (!msg_copy->image_clipboard.data) {
                 LOG_OOM();
                 free(msg_copy);
+                sc_device_msg_destroy(msg);
                 return;
             }
             memcpy(msg_copy->image_clipboard.data, msg->image_clipboard.data, msg->image_clipboard.size);
@@ -211,6 +213,7 @@ process_msg(struct sc_receiver *receiver, struct sc_device_msg *msg) {
                 LOG_OOM();
                 free(msg_copy->image_clipboard.data);
                 free(msg_copy);
+                sc_device_msg_destroy(msg);
                 return;
             }
             strcpy(msg_copy->image_clipboard.mimetype, msg->image_clipboard.mimetype);
@@ -221,8 +224,13 @@ process_msg(struct sc_receiver *receiver, struct sc_device_msg *msg) {
                 free(msg_copy->image_clipboard.data);
                 free(msg_copy->image_clipboard.mimetype);
                 free(msg_copy);
+                sc_device_msg_destroy(msg);
                 return;
             }
+
+            // The original message buffers are not transferred (a copy was
+            // posted to the main thread), so destroy them here
+            sc_device_msg_destroy(msg);
 
             break;
         }
@@ -266,6 +274,7 @@ process_msg(struct sc_receiver *receiver, struct sc_device_msg *msg) {
             struct sc_uhid_output_task_data *data = malloc(sizeof(*data));
             if (!data) {
                 LOG_OOM();
+                sc_device_msg_destroy(msg);
                 return;
             }
 
@@ -296,7 +305,11 @@ process_msg(struct sc_receiver *receiver, struct sc_device_msg *msg) {
                 return;
             }
             *msg_copy = *msg; // shallow copy (no heap pointers, safe)
-            bool ok = sc_run_on_main_thread(task_set_abr_state, msg_copy, true);
+            // Do not wait for completion: the receiver must never block on
+            // the main thread while holding the sc_run_on_main_thread mutex
+            // (sc_main_thread_stop() takes the same mutex at shutdown,
+            // which would deadlock)
+            bool ok = sc_run_on_main_thread(task_set_abr_state, msg_copy, false);
             if (!ok) {
                 free(msg_copy);
             }

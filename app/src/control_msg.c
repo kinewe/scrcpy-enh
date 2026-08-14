@@ -101,8 +101,82 @@ write_string_tiny(uint8_t *buf, const char *utf8, size_t max_len) {
     return 1 + len;
 }
 
+// Compute the serialized size of a length (4 bytes) + string payload,
+// without writing anything.
+static size_t
+string_size(const char *utf8, size_t max_len) {
+    return 4 + (utf8 ? sc_str_utf8_truncation_index(utf8, max_len) : 0);
+}
+
+// Same, for a length (1 byte) + string payload.
+static size_t
+string_size_tiny(const char *utf8, size_t max_len) {
+    return 1 + (utf8 ? sc_str_utf8_truncation_index(utf8, max_len) : 0);
+}
+
 size_t
-sc_control_msg_serialize(const struct sc_control_msg *msg, uint8_t *buf) {
+sc_control_msg_serialized_size(const struct sc_control_msg *msg) {
+    switch (msg->type) {
+        case SC_CONTROL_MSG_TYPE_INJECT_KEYCODE:
+            return 14;
+        case SC_CONTROL_MSG_TYPE_INJECT_TEXT:
+            return 1 + string_size(msg->inject_text.text,
+                                   SC_CONTROL_MSG_INJECT_TEXT_MAX_LENGTH);
+        case SC_CONTROL_MSG_TYPE_INJECT_TOUCH_EVENT:
+            return 32;
+        case SC_CONTROL_MSG_TYPE_INJECT_SCROLL_EVENT:
+            return 21;
+        case SC_CONTROL_MSG_TYPE_BACK_OR_SCREEN_ON:
+            return 2;
+        case SC_CONTROL_MSG_TYPE_GET_CLIPBOARD:
+            return 2;
+        case SC_CONTROL_MSG_TYPE_SET_CLIPBOARD:
+            return 10 + string_size(msg->set_clipboard.text,
+                                    SC_CONTROL_MSG_CLIPBOARD_TEXT_MAX_LENGTH);
+        case SC_CONTROL_MSG_TYPE_SET_IMAGE_CLIPBOARD:
+            return 18 + strlen(msg->set_image_clipboard.mimetype)
+                   + msg->set_image_clipboard.size;
+        case SC_CONTROL_MSG_TYPE_SAVE_CLIPBOARD_IMAGE_TO_GALLERY:
+            // no argument
+            return 1;
+        case SC_CONTROL_MSG_TYPE_SET_DISPLAY_POWER:
+            return 2;
+        case SC_CONTROL_MSG_TYPE_UHID_CREATE:
+            return 7 + string_size_tiny(msg->uhid_create.name, 127) + 2
+                   + msg->uhid_create.report_desc_size;
+        case SC_CONTROL_MSG_TYPE_UHID_INPUT:
+            return 5 + msg->uhid_input.size;
+        case SC_CONTROL_MSG_TYPE_UHID_DESTROY:
+            return 3;
+        case SC_CONTROL_MSG_TYPE_START_APP:
+            return 1 + string_size_tiny(msg->start_app.name, 255);
+        case SC_CONTROL_MSG_TYPE_CAMERA_SET_TORCH:
+            return 2;
+        case SC_CONTROL_MSG_TYPE_RESIZE_DISPLAY:
+            return 5;
+        case SC_CONTROL_MSG_TYPE_SCAN_FILE:
+            return 1 + string_size(msg->scan_file.path,
+                                   SC_CONTROL_MSG_SCAN_FILE_PATH_MAX_LENGTH);
+        case SC_CONTROL_MSG_TYPE_EXPAND_NOTIFICATION_PANEL:
+        case SC_CONTROL_MSG_TYPE_EXPAND_SETTINGS_PANEL:
+        case SC_CONTROL_MSG_TYPE_COLLAPSE_PANELS:
+        case SC_CONTROL_MSG_TYPE_ROTATE_DEVICE:
+        case SC_CONTROL_MSG_TYPE_OPEN_HARD_KEYBOARD_SETTINGS:
+        case SC_CONTROL_MSG_TYPE_RESET_VIDEO:
+        case SC_CONTROL_MSG_TYPE_CAMERA_ZOOM_IN:
+        case SC_CONTROL_MSG_TYPE_CAMERA_ZOOM_OUT:
+            // no additional data
+            return 1;
+        default:
+            return 0;
+    }
+}
+
+// Serialize the message into buf (which must be large enough for the exact
+// size returned by sc_control_msg_serialized_size()) and return the number
+// of bytes written. The wire format is unchanged.
+static size_t
+serialize_into(const struct sc_control_msg *msg, uint8_t *buf) {
     buf[0] = msg->type;
     switch (msg->type) {
         case SC_CONTROL_MSG_TYPE_INJECT_KEYCODE:
@@ -226,6 +300,30 @@ sc_control_msg_serialize(const struct sc_control_msg *msg, uint8_t *buf) {
             LOGW("Unknown message type: %u", (unsigned) msg->type);
             return 0;
     }
+}
+
+uint8_t *
+sc_control_msg_serialize(const struct sc_control_msg *msg, size_t *len) {
+    size_t size = sc_control_msg_serialized_size(msg);
+    if (!size) {
+        if (len) {
+            *len = 0;
+        }
+        return NULL;
+    }
+    uint8_t *buf = malloc(size);
+    if (!buf) {
+        if (len) {
+            *len = 0;
+        }
+        return NULL;
+    }
+    size_t written = serialize_into(msg, buf);
+    assert(written == size);
+    if (len) {
+        *len = written;
+    }
+    return buf;
 }
 
 void

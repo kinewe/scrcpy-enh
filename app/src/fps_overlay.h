@@ -42,7 +42,7 @@ void sc_fps_overlay_update_abr(struct sc_fps_overlay *overlay, int bitrate,
 // get the current overlay position (resolves -1 to the default top-right)
 void sc_fps_overlay_get_pos(struct sc_fps_overlay *overlay, int out_w,
                             int *x, int *y);
-// set the overlay position (user: Alt+drag to reposition)
+// set the overlay position (Alt+drag to reposition)
 void sc_fps_overlay_set_pos(struct sc_fps_overlay *overlay, int x, int y);
 
 #endif

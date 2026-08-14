@@ -263,9 +263,13 @@ public final class UhidManager {
             return;
         }
 
+        // Unregister the listeners before closing: a listener registered on
+        // a closed fd would fire and log a read error on every event
         for (FileDescriptor fd : fds.values()) {
+            unregisterUhidListener(fd);
             close(fd);
         }
+        fds.clear();
 
         removeUniqueIdAssociation();
     }

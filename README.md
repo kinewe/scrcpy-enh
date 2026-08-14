@@ -1,8 +1,8 @@
-# scrcpy-catgirl（音墨自定义版）
+# scrcpy 增强版（scrcpy-enh）
 
-基于 [scrcpy 4.1](https://github.com/Genymobile/scrcpy) 的自定义构建，专为「电脑 ↔ Android 移动设备」的高效协同打造。
+基于 [scrcpy 4.1](https://github.com/Genymobile/scrcpy) 的增强构建，面向「电脑 ↔ Android 移动设备」投屏协同场景，在官方版本之上提供自适应码率、状态显示、图片剪贴板等实用增强功能。
 
-> 🎉 **v1.3.1 已正式发布**（master 分支）——[Release 下载](https://github.com/kinewe/PC-kinewe-yinmo/releases/tag/v1.3.1)（zip 约 64MB，含全部运行库，解压即用）
+> **v1.3.1 已正式发布**（master 分支）——[Release 下载](https://github.com/kinewe/PC-kinewe-yinmo/releases/tag/v1.3.1)（zip 约 64MB，含全部运行库，解压即用）
 
 ---
 
@@ -12,7 +12,7 @@
 |---|---|---|
 | 🔄 **投屏循环 + 插线检测** | v1.1 | USB 拔插自动切换有线/无线，无需手动操作 |
 | 🎹 **uhid 键盘伪装** | v1.2 | 电脑键盘被 Android 认作「外部物理键盘」，可直接打中文 |
-| 📋 **图片剪贴板同步** | v1.2 | 电脑复制图片/文本 → 自动同步手机剪贴板（自研 PR #6676） |
+| 📋 **图片剪贴板同步** | v1.2 | 电脑复制图片/文本 → 自动同步手机剪贴板（合并 PR #6676） |
 | 🖼️ **Ctrl+G 存相册** | v1.2 | 投屏中按 Ctrl+G 把剪贴板原图保存到手机相册 |
 | 📐 **动态规格分配** | v1.2.1 | 插线时读取设备分辨率/刷新率，动态分配串流规格 |
 | ⚡ **ABR 双维自适应** | v1.3 | 码率 + 帧率双维自适应降级/恢复，压力下保持跟手 |
@@ -110,8 +110,8 @@
 
 ```bash
 # Server（Android 端）：
-cd server && export JAVA_HOME=F:/jdk17
-/c/Users/71420/.gradle/wrapper/dists/gradle-9.3.1-bin/23ovyewtku6u96viwx3xl3oks/gradle-9.3.1/bin/gradle --no-daemon assemble
+cd server && export JAVA_HOME=/path/to/jdk17
+gradle --no-daemon assemble
 # 产物：server/build/outputs/apk/debug/server-debug.apk → 复制为 dist/scrcpy-server
 
 # Client（Windows 端）：
@@ -146,4 +146,4 @@ A：无线规格 15M/1920/60fps，受 WiFi 抖动影响（28-30ms 常态抖动�
 | v1.2.1 | 动态规格分配（插线读分辨率/刷新率） |
 | v1.2 | uhid 键盘伪装中文输入、图片剪贴板同步（PR #6676）、Ctrl+G 存相册 |
 | v1.1 | 投屏循环 + USB/WiFi 自动切换 |
-| v1.0 | 初始自定义构建 |
+| v1.0 | 首个增强构建 |

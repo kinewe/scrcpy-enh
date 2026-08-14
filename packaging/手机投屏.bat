@@ -37,7 +37,7 @@ set "WIFI_ARGS=--keyboard=uhid --video-codec=h264 --video-bit-rate=15M --max-siz
 
 rem ===== 自动切换投屏模式参数（与 手机投屏.bat 同步）=====
 rem 注：WATCH_TAG 独立命名，避免与 手机投屏.bat 的后台监测进程互相误杀
-set "WATCH_TAG=YINMO_LAUNCH_USB_WATCH"
+set "WATCH_TAG=SCRCPY_LAUNCH_USB_WATCH"
 set "WATCH_INTERVAL=2"
 set "AUTO_RETRY_SEC=2"
 

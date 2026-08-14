@@ -80,11 +80,13 @@ sc_device_msg_deserialize(const uint8_t *buf, size_t len,
             uint32_t mimetype_len = sc_read32be(&buf[1]);
             uint32_t data_len = sc_read32be(&buf[5]);
 
-            if (mimetype_len + data_len > len - 9) {
+            // Check each length against the remaining buffer independently:
+            // the uint32 addition could wrap and bypass the bounds check
+            if (mimetype_len > len - 9 || data_len > (len - 9) - mimetype_len) {
                 return 0; // no complete message
             }
 
-            char *mimetype = malloc(mimetype_len + 1);
+            char *mimetype = malloc((size_t) mimetype_len + 1);
             if (!mimetype) {
                 LOG_OOM();
                 return -1;
@@ -114,8 +116,8 @@ sc_device_msg_deserialize(const uint8_t *buf, size_t len,
             if (len < 9) {
                 return 0; // no complete message (TCP fragmentation)
             }
-            msg->abr_state.bitrate = (uint32_t) buf[1] << 24 | buf[2] << 16 | buf[3] << 8 | buf[4];
-            msg->abr_state.fps = (uint32_t) buf[5] << 24 | buf[6] << 16 | buf[7] << 8 | buf[8];
+            msg->abr_state.bitrate = sc_read32be(&buf[1]);
+            msg->abr_state.fps = sc_read32be(&buf[5]);
             return 9;
         }
         default:

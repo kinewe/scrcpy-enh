@@ -1475,7 +1475,7 @@ sc_screen_handle_event(struct sc_screen *screen, const SDL_Event *event) {
             return;
     }
 
-    // Alt+left-drag repositions the fps overlay (user: hold Alt and drag
+    // Alt+left-drag repositions the fps overlay (hold Alt and drag
     // the corner widget to move it; the event is consumed, not injected).
     if (event->type == SDL_EVENT_MOUSE_BUTTON_DOWN
             && event->button.button == SDL_BUTTON_LEFT
@@ -1499,10 +1499,18 @@ sc_screen_handle_event(struct sc_screen *screen, const SDL_Event *event) {
             return;
         }
         // Keep the whole widget inside the window: clamp the top-left
-        // corner to [0, out - tex] on both axes (user: dragging must not
+        // corner to [0, out - tex] on both axes (dragging must not
         // move the widget out of view).
         int max_x = out_w - screen->fps_overlay.tex_w;
         int max_y = out_h - screen->fps_overlay.tex_h;
+        // A window smaller than the texture would make the clamp range
+        // negative; fall back to 0 so the widget stays visible
+        if (max_x < 0) {
+            max_x = 0;
+        }
+        if (max_y < 0) {
+            max_y = 0;
+        }
         int nx = (int) event->motion.x - screen->overlay_drag_dx;
         int ny = (int) event->motion.y - screen->overlay_drag_dy;
         if (nx < 0) {
@@ -1519,7 +1527,9 @@ sc_screen_handle_event(struct sc_screen *screen, const SDL_Event *event) {
         sc_screen_render(screen, false);
         return;
     }
-    if (event->type == SDL_EVENT_MOUSE_BUTTON_UP && screen->overlay_dragging) {
+    if (event->type == SDL_EVENT_MOUSE_BUTTON_UP
+            && event->button.button == SDL_BUTTON_LEFT
+            && screen->overlay_dragging) {
         screen->overlay_dragging = false;
         return;
     }

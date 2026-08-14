@@ -2,6 +2,7 @@
 
 #include <assert.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "control_msg.h"
@@ -17,8 +18,9 @@ static void test_serialize_inject_keycode(void) {
         },
     };
 
-    uint8_t buf[SC_CONTROL_MSG_MAX_SIZE];
-    size_t size = sc_control_msg_serialize(&msg, buf);
+    size_t size;
+    uint8_t *buf = sc_control_msg_serialize(&msg, &size);
+    assert(buf);
     assert(size == 14);
 
     const uint8_t expected[] = {
@@ -29,6 +31,7 @@ static void test_serialize_inject_keycode(void) {
         0x00, 0x00, 0x00, 0x41, // AMETA_SHIFT_ON | AMETA_SHIFT_LEFT_ON
     };
     assert(!memcmp(buf, expected, sizeof(expected)));
+    free(buf);
 }
 
 static void test_serialize_inject_text(void) {
@@ -39,8 +42,9 @@ static void test_serialize_inject_text(void) {
         },
     };
 
-    uint8_t buf[SC_CONTROL_MSG_MAX_SIZE];
-    size_t size = sc_control_msg_serialize(&msg, buf);
+    size_t size;
+    uint8_t *buf = sc_control_msg_serialize(&msg, &size);
+    assert(buf);
     assert(size == 18);
 
     const uint8_t expected[] = {
@@ -49,6 +53,7 @@ static void test_serialize_inject_text(void) {
         'h', 'e', 'l', 'l', 'o', ',', ' ', 'w', 'o', 'r', 'l', 'd', '!', // text
     };
     assert(!memcmp(buf, expected, sizeof(expected)));
+    free(buf);
 }
 
 static void test_serialize_inject_text_long(void) {
@@ -59,8 +64,9 @@ static void test_serialize_inject_text_long(void) {
     text[SC_CONTROL_MSG_INJECT_TEXT_MAX_LENGTH] = '\0';
     msg.inject_text.text = text;
 
-    uint8_t buf[SC_CONTROL_MSG_MAX_SIZE];
-    size_t size = sc_control_msg_serialize(&msg, buf);
+    size_t size;
+    uint8_t *buf = sc_control_msg_serialize(&msg, &size);
+    assert(buf);
     assert(size == 5 + SC_CONTROL_MSG_INJECT_TEXT_MAX_LENGTH);
 
     uint8_t expected[5 + SC_CONTROL_MSG_INJECT_TEXT_MAX_LENGTH];
@@ -72,6 +78,7 @@ static void test_serialize_inject_text_long(void) {
     memset(&expected[5], 'a', SC_CONTROL_MSG_INJECT_TEXT_MAX_LENGTH);
 
     assert(!memcmp(buf, expected, sizeof(expected)));
+    free(buf);
 }
 
 static void test_serialize_inject_touch_event(void) {
@@ -96,8 +103,9 @@ static void test_serialize_inject_touch_event(void) {
         },
     };
 
-    uint8_t buf[SC_CONTROL_MSG_MAX_SIZE];
-    size_t size = sc_control_msg_serialize(&msg, buf);
+    size_t size;
+    uint8_t *buf = sc_control_msg_serialize(&msg, &size);
+    assert(buf);
     assert(size == 32);
 
     const uint8_t expected[] = {
@@ -111,6 +119,7 @@ static void test_serialize_inject_touch_event(void) {
         0x00, 0x00, 0x00, 0x01, // AMOTION_EVENT_BUTTON_PRIMARY (buttons)
     };
     assert(!memcmp(buf, expected, sizeof(expected)));
+    free(buf);
 }
 
 static void test_serialize_inject_scroll_event(void) {
@@ -133,8 +142,9 @@ static void test_serialize_inject_scroll_event(void) {
         },
     };
 
-    uint8_t buf[SC_CONTROL_MSG_MAX_SIZE];
-    size_t size = sc_control_msg_serialize(&msg, buf);
+    size_t size;
+    uint8_t *buf = sc_control_msg_serialize(&msg, &size);
+    assert(buf);
     assert(size == 21);
 
     const uint8_t expected[] = {
@@ -146,6 +156,7 @@ static void test_serialize_inject_scroll_event(void) {
         0x00, 0x00, 0x00, 0x01, // 1
     };
     assert(!memcmp(buf, expected, sizeof(expected)));
+    free(buf);
 }
 
 static void test_serialize_back_or_screen_on(void) {
@@ -156,8 +167,9 @@ static void test_serialize_back_or_screen_on(void) {
         },
     };
 
-    uint8_t buf[SC_CONTROL_MSG_MAX_SIZE];
-    size_t size = sc_control_msg_serialize(&msg, buf);
+    size_t size;
+    uint8_t *buf = sc_control_msg_serialize(&msg, &size);
+    assert(buf);
     assert(size == 2);
 
     const uint8_t expected[] = {
@@ -165,6 +177,7 @@ static void test_serialize_back_or_screen_on(void) {
         0x01, // AKEY_EVENT_ACTION_UP
     };
     assert(!memcmp(buf, expected, sizeof(expected)));
+    free(buf);
 }
 
 static void test_serialize_expand_notification_panel(void) {
@@ -172,14 +185,16 @@ static void test_serialize_expand_notification_panel(void) {
         .type = SC_CONTROL_MSG_TYPE_EXPAND_NOTIFICATION_PANEL,
     };
 
-    uint8_t buf[SC_CONTROL_MSG_MAX_SIZE];
-    size_t size = sc_control_msg_serialize(&msg, buf);
+    size_t size;
+    uint8_t *buf = sc_control_msg_serialize(&msg, &size);
+    assert(buf);
     assert(size == 1);
 
     const uint8_t expected[] = {
         SC_CONTROL_MSG_TYPE_EXPAND_NOTIFICATION_PANEL,
     };
     assert(!memcmp(buf, expected, sizeof(expected)));
+    free(buf);
 }
 
 static void test_serialize_expand_settings_panel(void) {
@@ -187,14 +202,16 @@ static void test_serialize_expand_settings_panel(void) {
         .type = SC_CONTROL_MSG_TYPE_EXPAND_SETTINGS_PANEL,
     };
 
-    uint8_t buf[SC_CONTROL_MSG_MAX_SIZE];
-    size_t size = sc_control_msg_serialize(&msg, buf);
+    size_t size;
+    uint8_t *buf = sc_control_msg_serialize(&msg, &size);
+    assert(buf);
     assert(size == 1);
 
     const uint8_t expected[] = {
         SC_CONTROL_MSG_TYPE_EXPAND_SETTINGS_PANEL,
     };
     assert(!memcmp(buf, expected, sizeof(expected)));
+    free(buf);
 }
 
 static void test_serialize_collapse_panels(void) {
@@ -202,14 +219,16 @@ static void test_serialize_collapse_panels(void) {
         .type = SC_CONTROL_MSG_TYPE_COLLAPSE_PANELS,
     };
 
-    uint8_t buf[SC_CONTROL_MSG_MAX_SIZE];
-    size_t size = sc_control_msg_serialize(&msg, buf);
+    size_t size;
+    uint8_t *buf = sc_control_msg_serialize(&msg, &size);
+    assert(buf);
     assert(size == 1);
 
     const uint8_t expected[] = {
         SC_CONTROL_MSG_TYPE_COLLAPSE_PANELS,
     };
     assert(!memcmp(buf, expected, sizeof(expected)));
+    free(buf);
 }
 
 static void test_serialize_get_clipboard(void) {
@@ -220,8 +239,9 @@ static void test_serialize_get_clipboard(void) {
         },
     };
 
-    uint8_t buf[SC_CONTROL_MSG_MAX_SIZE];
-    size_t size = sc_control_msg_serialize(&msg, buf);
+    size_t size;
+    uint8_t *buf = sc_control_msg_serialize(&msg, &size);
+    assert(buf);
     assert(size == 2);
 
     const uint8_t expected[] = {
@@ -229,6 +249,7 @@ static void test_serialize_get_clipboard(void) {
         SC_COPY_KEY_COPY,
     };
     assert(!memcmp(buf, expected, sizeof(expected)));
+    free(buf);
 }
 
 static void test_serialize_set_clipboard(void) {
@@ -241,8 +262,9 @@ static void test_serialize_set_clipboard(void) {
         },
     };
 
-    uint8_t buf[SC_CONTROL_MSG_MAX_SIZE];
-    size_t size = sc_control_msg_serialize(&msg, buf);
+    size_t size;
+    uint8_t *buf = sc_control_msg_serialize(&msg, &size);
+    assert(buf);
     assert(size == 27);
 
     const uint8_t expected[] = {
@@ -253,6 +275,7 @@ static void test_serialize_set_clipboard(void) {
         'h', 'e', 'l', 'l', 'o', ',', ' ', 'w', 'o', 'r', 'l', 'd', '!', // text
     };
     assert(!memcmp(buf, expected, sizeof(expected)));
+    free(buf);
 }
 
 static void test_serialize_set_clipboard_long(void) {
@@ -270,8 +293,9 @@ static void test_serialize_set_clipboard_long(void) {
     text[SC_CONTROL_MSG_CLIPBOARD_TEXT_MAX_LENGTH] = '\0';
     msg.set_clipboard.text = text;
 
-    uint8_t buf[SC_CONTROL_MSG_MAX_SIZE];
-    size_t size = sc_control_msg_serialize(&msg, buf);
+    size_t size;
+    uint8_t *buf = sc_control_msg_serialize(&msg, &size);
+    assert(buf);
     assert(size == SC_CONTROL_MSG_MAX_SIZE);
 
     uint8_t expected[SC_CONTROL_MSG_MAX_SIZE] = {
@@ -287,6 +311,7 @@ static void test_serialize_set_clipboard_long(void) {
     memset(expected + 14, 'a', SC_CONTROL_MSG_CLIPBOARD_TEXT_MAX_LENGTH);
 
     assert(!memcmp(buf, expected, sizeof(expected)));
+    free(buf);
 }
 
 static void test_serialize_set_display_power(void) {
@@ -297,8 +322,9 @@ static void test_serialize_set_display_power(void) {
         },
     };
 
-    uint8_t buf[SC_CONTROL_MSG_MAX_SIZE];
-    size_t size = sc_control_msg_serialize(&msg, buf);
+    size_t size;
+    uint8_t *buf = sc_control_msg_serialize(&msg, &size);
+    assert(buf);
     assert(size == 2);
 
     const uint8_t expected[] = {
@@ -306,6 +332,7 @@ static void test_serialize_set_display_power(void) {
         0x01, // true
     };
     assert(!memcmp(buf, expected, sizeof(expected)));
+    free(buf);
 }
 
 static void test_serialize_rotate_device(void) {
@@ -313,14 +340,16 @@ static void test_serialize_rotate_device(void) {
         .type = SC_CONTROL_MSG_TYPE_ROTATE_DEVICE,
     };
 
-    uint8_t buf[SC_CONTROL_MSG_MAX_SIZE];
-    size_t size = sc_control_msg_serialize(&msg, buf);
+    size_t size;
+    uint8_t *buf = sc_control_msg_serialize(&msg, &size);
+    assert(buf);
     assert(size == 1);
 
     const uint8_t expected[] = {
         SC_CONTROL_MSG_TYPE_ROTATE_DEVICE,
     };
     assert(!memcmp(buf, expected, sizeof(expected)));
+    free(buf);
 }
 
 static void test_serialize_uhid_create(void) {
@@ -337,8 +366,9 @@ static void test_serialize_uhid_create(void) {
         },
     };
 
-    uint8_t buf[SC_CONTROL_MSG_MAX_SIZE];
-    size_t size = sc_control_msg_serialize(&msg, buf);
+    size_t size;
+    uint8_t *buf = sc_control_msg_serialize(&msg, &size);
+    assert(buf);
     assert(size == 24);
 
     const uint8_t expected[] = {
@@ -352,6 +382,7 @@ static void test_serialize_uhid_create(void) {
         1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11,
     };
     assert(!memcmp(buf, expected, sizeof(expected)));
+    free(buf);
 }
 
 static void test_serialize_uhid_input(void) {
@@ -364,8 +395,9 @@ static void test_serialize_uhid_input(void) {
         },
     };
 
-    uint8_t buf[SC_CONTROL_MSG_MAX_SIZE];
-    size_t size = sc_control_msg_serialize(&msg, buf);
+    size_t size;
+    uint8_t *buf = sc_control_msg_serialize(&msg, &size);
+    assert(buf);
     assert(size == 10);
 
     const uint8_t expected[] = {
@@ -375,6 +407,7 @@ static void test_serialize_uhid_input(void) {
         1, 2, 3, 4, 5,
     };
     assert(!memcmp(buf, expected, sizeof(expected)));
+    free(buf);
 }
 
 static void test_serialize_uhid_destroy(void) {
@@ -385,8 +418,9 @@ static void test_serialize_uhid_destroy(void) {
         },
     };
 
-    uint8_t buf[SC_CONTROL_MSG_MAX_SIZE];
-    size_t size = sc_control_msg_serialize(&msg, buf);
+    size_t size;
+    uint8_t *buf = sc_control_msg_serialize(&msg, &size);
+    assert(buf);
     assert(size == 3);
 
     const uint8_t expected[] = {
@@ -394,6 +428,7 @@ static void test_serialize_uhid_destroy(void) {
         0, 42, // id
     };
     assert(!memcmp(buf, expected, sizeof(expected)));
+    free(buf);
 }
 
 static void test_serialize_open_hard_keyboard(void) {
@@ -401,14 +436,16 @@ static void test_serialize_open_hard_keyboard(void) {
         .type = SC_CONTROL_MSG_TYPE_OPEN_HARD_KEYBOARD_SETTINGS,
     };
 
-    uint8_t buf[SC_CONTROL_MSG_MAX_SIZE];
-    size_t size = sc_control_msg_serialize(&msg, buf);
+    size_t size;
+    uint8_t *buf = sc_control_msg_serialize(&msg, &size);
+    assert(buf);
     assert(size == 1);
 
     const uint8_t expected[] = {
         SC_CONTROL_MSG_TYPE_OPEN_HARD_KEYBOARD_SETTINGS,
     };
     assert(!memcmp(buf, expected, sizeof(expected)));
+    free(buf);
 }
 
 static void test_serialize_start_app(void) {
@@ -419,8 +456,9 @@ static void test_serialize_start_app(void) {
         },
     };
 
-    uint8_t buf[SC_CONTROL_MSG_MAX_SIZE];
-    size_t size = sc_control_msg_serialize(&msg, buf);
+    size_t size;
+    uint8_t *buf = sc_control_msg_serialize(&msg, &size);
+    assert(buf);
     assert(size == 9);
 
     const uint8_t expected[] = {
@@ -429,6 +467,7 @@ static void test_serialize_start_app(void) {
         'f', 'i', 'r', 'e', 'f', 'o', 'x', // app name
     };
     assert(!memcmp(buf, expected, sizeof(expected)));
+    free(buf);
 }
 
 static void test_serialize_reset_video(void) {
@@ -436,14 +475,16 @@ static void test_serialize_reset_video(void) {
         .type = SC_CONTROL_MSG_TYPE_RESET_VIDEO,
     };
 
-    uint8_t buf[SC_CONTROL_MSG_MAX_SIZE];
-    size_t size = sc_control_msg_serialize(&msg, buf);
+    size_t size;
+    uint8_t *buf = sc_control_msg_serialize(&msg, &size);
+    assert(buf);
     assert(size == 1);
 
     const uint8_t expected[] = {
         SC_CONTROL_MSG_TYPE_RESET_VIDEO,
     };
     assert(!memcmp(buf, expected, sizeof(expected)));
+    free(buf);
 }
 
 static void test_serialize_camera_set_torch(void) {
@@ -454,8 +495,9 @@ static void test_serialize_camera_set_torch(void) {
         },
     };
 
-    uint8_t buf[SC_CONTROL_MSG_MAX_SIZE];
-    size_t size = sc_control_msg_serialize(&msg, buf);
+    size_t size;
+    uint8_t *buf = sc_control_msg_serialize(&msg, &size);
+    assert(buf);
     assert(size == 2);
 
     const uint8_t expected[] = {
@@ -463,6 +505,7 @@ static void test_serialize_camera_set_torch(void) {
         0x01, // true
     };
     assert(!memcmp(buf, expected, sizeof(expected)));
+    free(buf);
 }
 
 static void test_serialize_camera_zoom_in(void) {
@@ -470,14 +513,16 @@ static void test_serialize_camera_zoom_in(void) {
         .type = SC_CONTROL_MSG_TYPE_CAMERA_ZOOM_IN,
     };
 
-    uint8_t buf[SC_CONTROL_MSG_MAX_SIZE];
-    size_t size = sc_control_msg_serialize(&msg, buf);
+    size_t size;
+    uint8_t *buf = sc_control_msg_serialize(&msg, &size);
+    assert(buf);
     assert(size == 1);
 
     const uint8_t expected[] = {
         SC_CONTROL_MSG_TYPE_CAMERA_ZOOM_IN,
     };
     assert(!memcmp(buf, expected, sizeof(expected)));
+    free(buf);
 }
 
 static void test_serialize_camera_zoom_out(void) {
@@ -485,14 +530,16 @@ static void test_serialize_camera_zoom_out(void) {
         .type = SC_CONTROL_MSG_TYPE_CAMERA_ZOOM_OUT,
     };
 
-    uint8_t buf[SC_CONTROL_MSG_MAX_SIZE];
-    size_t size = sc_control_msg_serialize(&msg, buf);
+    size_t size;
+    uint8_t *buf = sc_control_msg_serialize(&msg, &size);
+    assert(buf);
     assert(size == 1);
 
     const uint8_t expected[] = {
         SC_CONTROL_MSG_TYPE_CAMERA_ZOOM_OUT,
     };
     assert(!memcmp(buf, expected, sizeof(expected)));
+    free(buf);
 }
 
 static void test_serialize_resize_display(void) {
@@ -504,8 +551,9 @@ static void test_serialize_resize_display(void) {
         },
     };
 
-    uint8_t buf[SC_CONTROL_MSG_MAX_SIZE];
-    size_t size = sc_control_msg_serialize(&msg, buf);
+    size_t size;
+    uint8_t *buf = sc_control_msg_serialize(&msg, &size);
+    assert(buf);
     assert(size == 5);
 
     const uint8_t expected[] = {
@@ -514,6 +562,7 @@ static void test_serialize_resize_display(void) {
         1080 >> 8, 1080 & 0xff,
     };
     assert(!memcmp(buf, expected, sizeof(expected)));
+    free(buf);
 }
 
 static void test_serialize_scan_file(void) {
@@ -524,8 +573,9 @@ static void test_serialize_scan_file(void) {
         },
     };
 
-    uint8_t buf[SC_CONTROL_MSG_MAX_SIZE];
-    size_t size = sc_control_msg_serialize(&msg, buf);
+    size_t size;
+    uint8_t *buf = sc_control_msg_serialize(&msg, &size);
+    assert(buf);
     assert(size == 21);
 
     const uint8_t expected[] = {
@@ -535,6 +585,7 @@ static void test_serialize_scan_file(void) {
         '/', 'D', 'o', 'w', 'n', 'l', 'o', 'a', 'd', // path
     };
     assert(!memcmp(buf, expected, sizeof(expected)));
+    free(buf);
 }
 
 int main(int argc, char *argv[]) {

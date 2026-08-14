@@ -85,8 +85,8 @@ static bool
 render_text(struct sc_fps_overlay *overlay, const char *text) {
     size_t len = strlen(text);
 
-    int w = (int) len * FONT_CHAR_W * FONT_SCALE
-          + (int) (len - 1) * FONT_SPACING;
+    size_t gaps = len ? len - 1 : 0;
+    int w = (int) (len * FONT_CHAR_W * FONT_SCALE + gaps * FONT_SPACING);
     int h = FONT_CHAR_H * FONT_SCALE;
 
     SDL_Surface *surface = SDL_CreateSurface(w, h, SDL_PIXELFORMAT_RGBA8888);
@@ -245,7 +245,7 @@ sc_fps_overlay_on_frame(struct sc_fps_overlay *overlay) {
     // "<fps>fps[/<abr_fps>] <bitrate><unit> <mode>"
     // e.g. "60/60fps 15M USB", "60fps 15M USB" (before ABR state)
     const char *mode = overlay->mode == SC_OVERLAY_MODE_WIFI ? "WIFI" : "USB";
-    char text[32];
+    char text[48];
     if (overlay->bitrate >= 1000000) {
         if (overlay->abr_fps > 0) {
             snprintf(text, sizeof(text), "%d/%dfps %dM %s", fps,

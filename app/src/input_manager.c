@@ -24,7 +24,9 @@
 // before sending, to keep control messages small. 16MB keeps the common
 // case lossless (BMP sent as-is, converted to PNG by the server); only
 // very large BMPs are compressed to stay within the control message limit
-// (SC_CONTROL_MSG_MAX_SIZE = 64MB).
+// (SC_CONTROL_MSG_MAX_SIZE = 256MB). Serialization allocates exactly the
+// message size on demand, so large messages cost transient heap memory
+// instead of a static 256MB buffer.
 #define SC_IMAGE_CLIPBOARD_COMPRESS_THRESHOLD (192 * 1024 * 1024) // 192MB (lossless: only a safety net near the 256MB message limit)
 
 // Interval of the Windows clipboard polling timer
@@ -653,6 +655,11 @@ clipboard_push_hdrop_image(struct sc_input_manager *im, bool paste,
     msg.set_image_clipboard.data = hdrop_data;
     msg.set_image_clipboard.size = hdrop_size;
     msg.set_image_clipboard.mimetype = strdup(hdrop_mime);
+    if (!msg.set_image_clipboard.mimetype) {
+        LOG_OOM();
+        free(hdrop_data);
+        return false;
+    }
     msg.set_image_clipboard.paste = paste;
     bool success = sc_controller_push_msg(im->controller, &msg);
     if (success) {
@@ -744,7 +751,9 @@ sc_input_manager_set_device_image_clipboard(struct sc_input_manager *im, bool pa
                      (unsigned) msg_size);
                 free(compressed);
                 SDL_free(img_data);
-                return true;
+                // Report the drop as a failure so the caller may fall back
+                // to the text clipboard (same behavior as the HDROP path)
+                return false;
             }
 
             struct sc_control_msg msg;
@@ -755,6 +764,13 @@ sc_input_manager_set_device_image_clipboard(struct sc_input_manager *im, bool pa
                 memcpy(msg.set_image_clipboard.data, data, size);
                 msg.set_image_clipboard.size = size;
                 msg.set_image_clipboard.mimetype = strdup(mime_type);
+                if (!msg.set_image_clipboard.mimetype) {
+                    LOG_OOM();
+                    free(msg.set_image_clipboard.data);
+                    free(compressed);
+                    SDL_free(img_data);
+                    return false;
+                }
                 msg.set_image_clipboard.paste = paste;
 
                 bool success = sc_controller_push_msg(im->controller, &msg);
