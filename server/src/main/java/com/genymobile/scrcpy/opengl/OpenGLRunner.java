@@ -14,6 +14,7 @@ import android.opengl.GLES11Ext;
 import android.opengl.GLES20;
 import android.os.Handler;
 import android.os.HandlerThread;
+import android.os.SystemClock;
 import android.view.Surface;
 
 import java.util.concurrent.Callable;
@@ -36,6 +37,11 @@ public final class OpenGLRunner {
     private int textureId;
 
     private boolean stopped;
+
+    // Dynamic fps cap (ABR fps level): written from the encoder thread via
+    // setTargetFps(), read on the GL thread at each frame callback.
+    private volatile int targetFps;
+    private long lastRenderedNs;
 
     public OpenGLRunner(OpenGLFilter filter, float[] overrideTransformMatrix) {
         this.filter = filter;
@@ -173,8 +179,36 @@ public final class OpenGLRunner {
                 return;
             }
 
+            // Dynamic fps limit (ABR): skip rendering when the frame arrives
+            // sooner than 1000/targetFps ms after the last rendered one.
+            // The encoder is never touched: this is a zero-interruption
+            // frame thinning on the GL layer.
+            int fps = targetFps;
+            if (fps > 0) {
+                long nowNs = SystemClock.elapsedRealtimeNanos();
+                long intervalNs = 1_000_000_000L / fps;
+                if (lastRenderedNs != 0 && nowNs - lastRenderedNs < intervalNs) {
+                    // Drop: acquire the new buffer and immediately release
+                    // it so the SurfaceTexture queue stays healthy (no
+                    // leak, no stall for the producer).
+                    surfaceTexture.updateTexImage();
+                    surfaceTexture.releaseTexImage();
+                    return;
+                }
+                lastRenderedNs = nowNs;
+            }
+
             render(outputSize);
         }, handler);
+    }
+
+    /**
+     * Set the render frame-rate cap (ABR fps level). Thread-safe: the value
+     * is read on the GL thread at each frame callback. 0 or negative =
+     * no limit (render every frame).
+     */
+    public void setTargetFps(int fps) {
+        targetFps = fps;
     }
 
     private void render(Size outputSize) {
