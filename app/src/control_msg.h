@@ -12,7 +12,10 @@
 #include "coords.h"
 #include "hid/hid_event.h"
 
-#define SC_CONTROL_MSG_MAX_SIZE (1 << 18) // 256k
+// 256M: protocol limit for lossless large image clipboard support. Buffers
+// are no longer statically reserved at this size: the client serialization
+// now allocates exactly the message size on demand (sc_control_msg_serialize).
+#define SC_CONTROL_MSG_MAX_SIZE (1 << 28)
 
 #define SC_CONTROL_MSG_INJECT_TEXT_MAX_LENGTH 300
 // type: 1 byte; sequence: 8 bytes; paste flag: 1 byte; length: 4 bytes
@@ -50,6 +53,11 @@ enum sc_control_msg_type {
     SC_CONTROL_MSG_TYPE_CAMERA_ZOOM_OUT,
     SC_CONTROL_MSG_TYPE_RESIZE_DISPLAY,
     SC_CONTROL_MSG_TYPE_SCAN_FILE,
+    SC_CONTROL_MSG_TYPE_SET_IMAGE_CLIPBOARD,
+    // No argument: the server copies the most recent clipboard image file
+    // (already stored in the device clipboard cache) to the gallery and
+    // triggers a media scan, so it appears in the gallery app.
+    SC_CONTROL_MSG_TYPE_SAVE_CLIPBOARD_IMAGE_TO_GALLERY,
 };
 
 enum sc_copy_key {
@@ -122,6 +130,13 @@ struct sc_control_msg {
             bool on;
         } camera_set_torch;
         struct {
+            uint64_t sequence;
+            uint8_t *data; // owned, to be freed by free()
+            uint32_t size;
+            char *mimetype; // owned, to be freed by free()
+            bool paste;
+        } set_image_clipboard;
+        struct {
             uint16_t width;
             uint16_t height;
         } resize_display;
@@ -131,10 +146,17 @@ struct sc_control_msg {
     };
 };
 
-// buf size must be at least CONTROL_MSG_MAX_SIZE
-// return the number of bytes written
+// Return the exact serialized size in bytes for this message (including the
+// type header), or 0 if the message type is unknown.
 size_t
-sc_control_msg_serialize(const struct sc_control_msg *msg, uint8_t *buf);
+sc_control_msg_serialized_size(const struct sc_control_msg *msg);
+
+// Allocate a buffer of the exact serialized size, write the serialized
+// message into it, and return the buffer (the caller must free() it).
+// *len is set to the serialized length. NULL (with *len = 0) is returned on
+// allocation failure or unknown message type. The wire format is unchanged.
+uint8_t *
+sc_control_msg_serialize(const struct sc_control_msg *msg, size_t *len);
 
 void
 sc_control_msg_log(const struct sc_control_msg *msg);
