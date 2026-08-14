@@ -1241,42 +1241,95 @@ sc_disconnect_on_timeout(struct sc_disconnect *d, void *userdata) {
 
 #ifdef _WIN32
 // Restore the system-wide keyboard layout after scrcpy lost focus.
-// Windows keyboard layouts are per-thread: while scrcpy has focus it is
-// the foreground thread, so ActivateKeyboardLayout() (in
-// sc_screen_apply_keyboard_layout) changes the system-wide (shared)
-// layout to English. On focus loss scrcpy is no longer the foreground
-// thread, so restoring inside the scrcpy thread only affects scrcpy
-// itself, leaving every other window (browser, etc.) on English.
-// Attaching our input state to the new foreground thread makes the next
-// ActivateKeyboardLayout() switch the shared system layout, i.e. the
-// layout used by all other windows.
-// With the "Let me use a different input method for each app window"
-// (per-app IME) setting enabled, each window has its own layout: the
-// foreground window keeps its own (non-English) layout, so no global
-// restore is needed -- and must not be done, as it would change the
-// foreground window's layout. Detected at runtime by comparing the
-// foreground thread layout with the English layout scrcpy forced.
+// Windows keyboard layouts are per-thread, but with the "Let me use a
+// different input method for each app window" setting disabled (the
+// default), the layout is system-wide: while scrcpy has focus,
+// ActivateKeyboardLayout() (in sc_screen_apply_keyboard_layout) switches
+// the shared layout to English and the system forwards the change to the
+// other threads. On focus loss scrcpy is no longer the foreground thread,
+// so restoring inside the scrcpy thread only affects scrcpy itself; the
+// restore below is global: it broadcasts WM_INPUTLANGCHANGEREQUEST to all
+// top-level windows (the same mechanism the language bar uses) and,
+// additionally, synchronously restores the new foreground thread via
+// AttachThreadInput + ActivateKeyboardLayout(), because TSF-integrated
+// apps (Office/Word, some edit controls) may not honor or may lag behind
+// the asynchronous broadcast.
+// With the per-app IME setting enabled, each window has its own layout:
+// the foreground window keeps its own (non-English) layout, so no restore
+// is needed -- and must not be done, as it would change the foreground
+// window's layout. Detected at runtime by comparing the foreground thread
+// layout with the English layout scrcpy forced.
 static void
 sc_screen_restore_global_keyboard_layout(struct sc_screen *screen) {
     HKL original = (HKL) screen->original_hkl;
     if (!original) {
         return;
     }
-    // The keyboard layout is a system-wide input language: scrcpy forcing
-    // English while focused affected every window, so the restore must be
-    // global too. Broadcast WM_INPUTLANGCHANGEREQUEST to all top-level
-    // windows (the same mechanism the language bar / Alt+Shift uses;
-    // reliable on Windows 10/11, unlike AttachThreadInput tricks which
-    // behave inconsistently for the English layout).
-    // Note: with the "Let me use a different input method for each app
-    // window" (per-app IME) setting enabled, this switches the keyboard
-    // layout of every window as well; the per-app TSF input method memory
-    // is not touched. This is acceptable: the whole point of the restore is
-    // to give the user back their original input method system-wide.
+    // Snapshot the new foreground thread before the broadcast: it is
+    // asynchronous, so this snapshot reflects the state at focus loss, i.e.
+    // whether the target thread is actually stuck on the English layout
+    // scrcpy forced (with the per-app IME setting enabled, the foreground
+    // window keeps its own layout and must not be touched).
+    HWND fg = GetForegroundWindow();
+    DWORD fg_tid = fg ? GetWindowThreadProcessId(fg, NULL) : 0;
+    DWORD cur_tid = GetCurrentThreadId();
+    unsigned long en_lang = screen->en_hkl
+        ? ((unsigned long) (uintptr_t) screen->en_hkl & 0xFFFF) : 0x0409;
+    HKL fg_hkl = fg_tid ? GetKeyboardLayout(fg_tid) : NULL;
+    bool fg_english = fg_hkl
+        && ((unsigned long) (uintptr_t) fg_hkl & 0xFFFF) == en_lang;
+
     LOGI("Keyboard layout globally restored to 0x%08lx (broadcast "
          "WM_INPUTLANGCHANGEREQUEST)", (unsigned long) (uintptr_t) original);
     PostMessage(HWND_BROADCAST, WM_INPUTLANGCHANGEREQUEST,
                 INPUTLANGCHANGE_FORWARD, (LPARAM) original);
+
+    if (!fg_tid || fg_tid == cur_tid) {
+        // No foreground thread, or it is our own thread, whose layout has
+        // already been restored by the caller.
+        return;
+    }
+    if (!fg_english) {
+        // Foreground thread has its own layout (per-app IME enabled, or
+        // already restored): leave it untouched.
+        return;
+    }
+    if (!AttachThreadInput(cur_tid, fg_tid, TRUE)) {
+        LOGW("AttachThreadInput to foreground thread failed: %lu",
+             (unsigned long) GetLastError());
+        return;
+    }
+    ActivateKeyboardLayout(original, 0);
+    AttachThreadInput(cur_tid, fg_tid, FALSE);
+    unsigned long orig_lang = (unsigned long) (uintptr_t) original & 0xFFFF;
+    HKL after_hkl = GetKeyboardLayout(fg_tid);
+    if (orig_lang != en_lang
+            && (!after_hkl
+                || ((unsigned long) (uintptr_t) after_hkl & 0xFFFF)
+                       == en_lang)) {
+        LOGW("Foreground thread layout still English after targeted "
+             "restore");
+        return;
+    }
+    LOGI("Foreground thread layout restored to 0x%08lx (AttachThreadInput)",
+         (unsigned long) (uintptr_t) original);
+
+    // The layout switch back to Chinese can leave the TSF IME in English
+    // mode (Chinese layout, IME closed). Mirror the IME open state saved at
+    // focus gain on the new foreground window only -- never touch any other
+    // window's IME state. Opening the IME is only safe under the original
+    // Chinese layout (ime_restore_allowed) and only after the layout switch
+    // above actually succeeded (otherwise the TSF IME would reactivate and
+    // switch the layout away).
+    if (screen->ime_open_saved_valid && screen->ime_open_saved
+            && screen->ime_restore_allowed) {
+        HIMC imc = ImmGetContext(fg);
+        if (imc) {
+            ImmSetOpenStatus(imc, TRUE);
+            ImmReleaseContext(fg, imc);
+            LOGI("Foreground window IME reopened (saved open state)");
+        }
+    }
 }
 
 static void
