@@ -1,0 +1,32 @@
+apply plugin: 'com.android.application'
+
+android {
+    namespace = 'com.genymobile.scrcpy'
+    compileSdk = 36
+    defaultConfig {
+        applicationId = "com.genymobile.scrcpy"
+        minSdkVersion 21
+        targetSdkVersion 36
+        versionCode 40100
+        versionName "4.1"
+        testInstrumentationRunner = "android.support.test.runner.AndroidJUnitRunner"
+    }
+    buildTypes {
+        release {
+            minifyEnabled false
+        }
+    }
+    buildFeatures {
+        buildConfig = true
+        aidl = true
+    }
+    lint {
+        disable 'UseRequiresApi'
+    }
+}
+
+dependencies {
+    testImplementation 'junit:junit:4.13.2'
+}
+
+apply from: "$project.rootDir/config/android-checkstyle.gradle"
