@@ -3,8 +3,14 @@
 #include <assert.h>
 #include <string.h>
 #include <SDL3/SDL.h>
+#ifdef _WIN32
+#include <stdio.h>
+#include <stdlib.h>
+#include <windows.h>
+#endif
 
 #include "events.h"
+#include "fps_overlay.h"
 #include "icon.h"
 #include "options.h"
 #include "util/log.h"
@@ -306,6 +312,10 @@ sc_screen_render(struct sc_screen *screen, bool update_content_rect) {
     }
 
 end:
+    // a hidden overlay (Ctrl+F toggle) must not be rendered at all
+    if (sc_fps_overlay_is_visible(&screen->fps_overlay)) {
+        sc_fps_overlay_draw(&screen->fps_overlay, renderer);
+    }
     sc_sdl_render_present(renderer);
 }
 
@@ -492,6 +502,16 @@ sc_screen_init(struct sc_screen *screen,
     screen->orientation = SC_ORIENTATION_0;
     screen->disconnected = false;
     screen->disconnect_started = false;
+    screen->hid_keyboard = params->hid_keyboard;
+#ifdef _WIN32
+    screen->original_hkl = NULL;
+    screen->en_hkl = NULL;
+    screen->layout_forced = false;
+    screen->ime_open_saved = false;
+    screen->ime_open_saved_valid = false;
+    screen->ime_restore_allowed = true;
+    screen->startup_hkl = params->startup_hkl;
+#endif
 
     screen->video = params->video;
     screen->camera = params->camera;
@@ -615,6 +635,11 @@ sc_screen_init(struct sc_screen *screen,
         goto error_destroy_renderer;
     }
 
+    if (!sc_fps_overlay_init(&screen->fps_overlay, screen->renderer)) {
+        // not fatal, the overlay is a nice-to-have
+        LOGW("Could not initialize FPS overlay");
+    }
+
     ok = SDL_StartTextInput(screen->window);
     if (!ok) {
         LOGE("Could not enable text input: %s", SDL_GetError());
@@ -665,6 +690,8 @@ sc_screen_init(struct sc_screen *screen,
         .mouse_bindings = params->mouse_bindings,
         .legacy_paste = params->legacy_paste,
         .clipboard_autosync = params->clipboard_autosync,
+        .clipboard_sync = params->clipboard_sync,
+        .clipboard_push_on_start = params->clipboard_push_on_start,
         .shortcut_mods = params->shortcut_mods,
     };
 
@@ -791,6 +818,11 @@ sc_screen_interrupt_disconnect(struct sc_screen *screen) {
     }
 }
 
+#ifdef _WIN32
+static void
+sc_screen_apply_keyboard_layout(struct sc_screen *screen, bool english);
+#endif
+
 void
 sc_screen_join(struct sc_screen *screen) {
     sc_fps_counter_join(&screen->fps_counter);
@@ -808,11 +840,24 @@ sc_screen_destroy(struct sc_screen *screen) {
         sc_disconnect_destroy(&screen->disconnect);
     }
     sc_texture_destroy(&screen->tex);
+    sc_fps_overlay_destroy(&screen->fps_overlay);
     av_frame_free(&screen->frame);
 #ifdef SC_DISPLAY_FORCE_OPENGL_CORE_PROFILE
     SDL_GL_DestroyContext(screen->gl_context);
 #endif
     SDL_DestroyRenderer(screen->renderer);
+#ifdef _WIN32
+    // The window may be closed directly (X button / Alt+F4) while focused:
+    // SDL destroys the window without posting SDL_EVENT_WINDOW_FOCUS_LOST,
+    // so the focus-lost handler below would never run and the computer
+    // would be left on the forced English layout. Restore the original
+    // layout on every exit path, while the window handle is still valid.
+    // No-op when the layout was already restored (layout_forced == false)
+    // or never forced (original_hkl == NULL).
+    if (screen->hid_keyboard && screen->layout_forced) {
+        sc_screen_apply_keyboard_layout(screen, false);
+    }
+#endif
     SDL_DestroyWindow(screen->window);
     sc_fps_counter_destroy(&screen->fps_counter);
     sc_frame_buffer_destroy(&screen->fb);
@@ -918,6 +963,7 @@ sc_screen_apply_frame(struct sc_screen *screen, bool can_resize) {
     assert(screen->window_shown);
 
     sc_fps_counter_add_rendered_frame(&screen->fps_counter);
+    sc_fps_overlay_on_frame(&screen->fps_overlay);
 
     AVFrame *frame = screen->frame;
     struct sc_size new_frame_size = {frame->width, frame->height};
@@ -954,6 +1000,55 @@ sc_screen_apply_frame(struct sc_screen *screen, bool can_resize) {
     return true;
 }
 
+#ifdef _WIN32
+// Absolute-latency measurement: log (wall clock ms, frame pts us) for
+// every rendered frame to %%TEMP%%\\scrcpy_frame_log.txt (overwritten on
+// each scrcpy start, unbuffered so data survives hard kills). The
+// analysis script pairs screen pulse detections with the nearest frame
+// and converts pts to device epoch ms via adb clock calibration.
+static FILE *g_frame_log;
+static void
+frame_log_open(void) {
+    if (g_frame_log) {
+        return;
+    }
+    const char *tmp = getenv("TEMP");
+    char path[MAX_PATH];
+    if (tmp) {
+        snprintf(path, sizeof(path), "%s\\scrcpy_frame_log.txt", tmp);
+    } else {
+        snprintf(path, sizeof(path), "scrcpy_frame_log.txt");
+    }
+    g_frame_log = fopen(path, "w");
+    if (g_frame_log) {
+        setvbuf(g_frame_log, NULL, _IONBF, 0);
+    }
+}
+
+static int64_t
+unix_ms_now(void) {
+    FILETIME ft;
+    GetSystemTimeAsFileTime(&ft);
+    ULARGE_INTEGER ul;
+    ul.LowPart = ft.dwLowDateTime;
+    ul.HighPart = ft.dwHighDateTime;
+    return (int64_t) ((ul.QuadPart - 116444736000000000ULL) / 10000);
+}
+
+static void
+frame_log_write(int64_t pts_us) {
+    if (pts_us < 0) {
+        return; // no pts (AV_NOPTS_VALUE)
+    }
+    frame_log_open();
+    if (g_frame_log) {
+        // 2 columns: wall_ms(render), pts_us(device)
+        fprintf(g_frame_log, "%lld,%lld\n", (long long) unix_ms_now(),
+                (long long) pts_us);
+    }
+}
+#endif
+
 static bool
 sc_screen_update_frame(struct sc_screen *screen) {
     assert(screen->video);
@@ -980,6 +1075,9 @@ sc_screen_update_frame(struct sc_screen *screen) {
     // read with lock held
     bool can_resize = !screen->prevent_auto_resize;
     sc_mutex_unlock(&screen->mutex);
+#ifdef _WIN32
+    frame_log_write(screen->frame->pts);
+#endif
     return sc_screen_apply_frame(screen, can_resize);
 }
 
@@ -1029,6 +1127,16 @@ sc_screen_toggle_fullscreen(struct sc_screen *screen) {
     }
 
     LOGD("Requested %s mode", req_fullscreen ? "fullscreen" : "windowed");
+}
+
+void
+sc_screen_toggle_fps_overlay(struct sc_screen *screen) {
+    struct sc_fps_overlay *overlay = &screen->fps_overlay;
+    bool visible = !sc_fps_overlay_is_visible(overlay);
+    sc_fps_overlay_set_visible(overlay, visible);
+    LOGI("fps overlay %s", visible ? "shown" : "hidden");
+    // repaint immediately so the toggle takes effect at once
+    sc_screen_render(screen, false);
 }
 
 void
@@ -1131,6 +1239,154 @@ sc_disconnect_on_timeout(struct sc_disconnect *d, void *userdata) {
     (void) ok; // ignore failure
 }
 
+#ifdef _WIN32
+// Restore the system-wide keyboard layout after scrcpy lost focus.
+// Windows keyboard layouts are per-thread: while scrcpy has focus it is
+// the foreground thread, so ActivateKeyboardLayout() (in
+// sc_screen_apply_keyboard_layout) changes the system-wide (shared)
+// layout to English. On focus loss scrcpy is no longer the foreground
+// thread, so restoring inside the scrcpy thread only affects scrcpy
+// itself, leaving every other window (browser, etc.) on English.
+// Attaching our input state to the new foreground thread makes the next
+// ActivateKeyboardLayout() switch the shared system layout, i.e. the
+// layout used by all other windows.
+// With the "Let me use a different input method for each app window"
+// (per-app IME) setting enabled, each window has its own layout: the
+// foreground window keeps its own (non-English) layout, so no global
+// restore is needed -- and must not be done, as it would change the
+// foreground window's layout. Detected at runtime by comparing the
+// foreground thread layout with the English layout scrcpy forced.
+static void
+sc_screen_restore_global_keyboard_layout(struct sc_screen *screen) {
+    HKL original = (HKL) screen->original_hkl;
+    if (!original) {
+        return;
+    }
+    // The keyboard layout is a system-wide input language: scrcpy forcing
+    // English while focused affected every window, so the restore must be
+    // global too. Broadcast WM_INPUTLANGCHANGEREQUEST to all top-level
+    // windows (the same mechanism the language bar / Alt+Shift uses;
+    // reliable on Windows 10/11, unlike AttachThreadInput tricks which
+    // behave inconsistently for the English layout).
+    // Note: with the "Let me use a different input method for each app
+    // window" (per-app IME) setting enabled, this switches the keyboard
+    // layout of every window as well; the per-app TSF input method memory
+    // is not touched. This is acceptable: the whole point of the restore is
+    // to give the user back their original input method system-wide.
+    LOGI("Keyboard layout globally restored to 0x%08lx (broadcast "
+         "WM_INPUTLANGCHANGEREQUEST)", (unsigned long) (uintptr_t) original);
+    PostMessage(HWND_BROADCAST, WM_INPUTLANGCHANGEREQUEST,
+                INPUTLANGCHANGE_FORWARD, (LPARAM) original);
+}
+
+static void
+sc_screen_apply_keyboard_layout(struct sc_screen *screen, bool english) {
+    HWND hwnd = (HWND) SDL_GetPointerProperty(
+            SDL_GetWindowProperties(screen->window),
+            SDL_PROP_WINDOW_WIN32_HWND_POINTER, NULL);
+    if (!hwnd) {
+        return;
+    }
+    if (english) {
+        if (screen->layout_forced) {
+            // Already forced: keep the current state, do not re-activate.
+            return;
+        }
+        if (!screen->original_hkl) {
+            // Prefer the layout captured before SDL initialization: after
+            // SDL_Init(VIDEO), GetKeyboardLayout(0) returns the Preload
+            // default of the scrcpy thread, which may differ from the
+            // user's actual system layout (problem B: restore switched to
+            // the wrong layout).
+            screen->original_hkl = screen->startup_hkl
+                                       ? screen->startup_hkl
+                                       : (void *) GetKeyboardLayout(0);
+        }
+        // Activate the English (US) keyboard layout. TSF input methods
+        // (Sogou, Microsoft Pinyin...) are bound to their own keyboard
+        // layout, so activating 00000409 disables them for this thread.
+        HKL en = LoadKeyboardLayoutW(L"00000409", KLF_ACTIVATE);
+        if (en) {
+            ActivateKeyboardLayout(en, 0);
+            screen->layout_forced = true;
+            screen->en_hkl = (void *) en;
+        }
+        // Also close the IME open status via IMM32 (best effort: TSF IMEs
+        // may ignore it, the layout switch above is the main mechanism).
+        // Save the original open status first so that focus loss restores
+        // it exactly: unconditionally reopening the IME under the ENG
+        // layout makes TSF activate the Chinese IME, which switches the
+        // layout away (problem B).
+        //
+        // Restoring the open status is only safe for Chinese layouts: on
+        // any other layout (e.g. the system current language is English),
+        // ImmSetOpenStatus(TRUE) activates the TSF Chinese IME which
+        // switches the layout away (problem B residual).
+        unsigned long ime_restore_lang = (unsigned long) (uintptr_t)
+            screen->original_hkl & 0x3FF;
+        screen->ime_restore_allowed =
+            ime_restore_lang == 0x0004 || ime_restore_lang == 0x0008;
+        HIMC imc = ImmGetContext(hwnd);
+        if (imc) {
+            if (!screen->ime_open_saved_valid) {
+                screen->ime_open_saved = ImmGetOpenStatus(imc) != FALSE;
+                screen->ime_open_saved_valid = true;
+            }
+            ImmSetOpenStatus(imc, FALSE);
+            ImmReleaseContext(hwnd, imc);
+        }
+        LOGI("IME layout forced to English (00000409), original 0x%08lx%s, "
+             "IME open saved=%d, restore_allowed=%d",
+             (unsigned long) (uintptr_t) screen->original_hkl,
+             screen->startup_hkl ? " (startup)" : " (thread)",
+             screen->ime_open_saved_valid ? (screen->ime_open_saved ? 1 : 0)
+                                          : -1,
+             screen->ime_restore_allowed ? 1 : 0);
+    } else if (screen->original_hkl) {
+        // Restore the user's original keyboard layout. The IME open status
+        // must be restored symmetrically: focus gained closed it via
+        // ImmSetOpenStatus(FALSE), otherwise TSF IMEs (Sogou, Microsoft
+        // Pinyin...) stay closed and the user cannot type Chinese after
+        // switching away from the scrcpy window ("layout not restored").
+        ActivateKeyboardLayout((HKL) screen->original_hkl, 0);
+        screen->layout_forced = false;
+        HIMC imc = ImmGetContext(hwnd);
+        bool ime_open = false;
+        if (imc) {
+            if (screen->ime_open_saved_valid) {
+                // Symmetric restore of the state recorded at focus gain
+                // (unconditionally reopening the IME under the ENG layout
+                // would trigger TSF to activate the Chinese IME and switch
+                // the layout away).
+                if (screen->ime_restore_allowed) {
+                    ImmSetOpenStatus(imc, screen->ime_open_saved);
+                } else {
+                    LOGI("IME open restore skipped (non-Chinese layout "
+                         "0x%08lx, reopening would switch the layout away)",
+                         (unsigned long) (uintptr_t) screen->original_hkl);
+                }
+                ime_open = ImmGetOpenStatus(imc) != FALSE;
+            } else {
+                // No saved state (no IME context when focus was gained):
+                // fall back to reopening the IME, best effort.
+                ImmSetOpenStatus(imc, TRUE);
+                ime_open = ImmGetOpenStatus(imc) != FALSE;
+            }
+            ImmReleaseContext(hwnd, imc);
+        }
+        LOGI("IME layout restored (0x%08lx), IME open=%d%s%s",
+             (unsigned long) (uintptr_t) screen->original_hkl, ime_open ? 1 : 0,
+             imc ? "" : " (no IME context: no IME installed on this system)",
+             screen->ime_open_saved_valid ? "" : " (no saved IME state)");
+        LOGI("IME: %s",
+             ime_open ? "open (Chinese IME usable)" : "closed or unavailable");
+        // Restore the system-wide layout (browser and other windows), not
+        // only the scrcpy thread's layout.
+        sc_screen_restore_global_keyboard_layout(screen);
+    }
+}
+#endif
+
 void
 sc_screen_handle_event(struct sc_screen *screen, const SDL_Event *event) {
     switch (event->type) {
@@ -1159,6 +1415,24 @@ sc_screen_handle_event(struct sc_screen *screen, const SDL_Event *event) {
             }
             return;
         }
+        case SDL_EVENT_WINDOW_FOCUS_GAINED:
+#ifdef _WIN32
+            // With HID keyboards (UHID/AOA), the computer IME must not
+            // interfere with the keys: force the English layout while the
+            // window has focus (TSF IMEs like Sogou react to plain Shift
+            // presses even when text input is not started).
+            if (screen->hid_keyboard) {
+                sc_screen_apply_keyboard_layout(screen, true);
+            }
+#endif
+            return;
+        case SDL_EVENT_WINDOW_FOCUS_LOST:
+#ifdef _WIN32
+            if (screen->hid_keyboard) {
+                sc_screen_apply_keyboard_layout(screen, false);
+            }
+#endif
+            return;
         case SDL_EVENT_WINDOW_EXPOSED:
             sc_screen_render(screen, true);
             return;
@@ -1212,6 +1486,65 @@ sc_screen_handle_event(struct sc_screen *screen, const SDL_Event *event) {
             }
 
             return;
+    }
+
+    // Alt+left-drag repositions the fps overlay (hold Alt and drag
+    // the corner widget to move it; the event is consumed, not injected).
+    if (event->type == SDL_EVENT_MOUSE_BUTTON_DOWN
+            && event->button.button == SDL_BUTTON_LEFT
+            && (SDL_GetModState() & SDL_KMOD_ALT)) {
+        int out_w;
+        int out_h;
+        if (SDL_GetRenderOutputSize(screen->renderer, &out_w, &out_h)) {
+            int ox;
+            int oy;
+            sc_fps_overlay_get_pos(&screen->fps_overlay, out_w, &ox, &oy);
+            screen->overlay_dragging = true;
+            screen->overlay_drag_dx = (int) event->button.x - ox;
+            screen->overlay_drag_dy = (int) event->button.y - oy;
+            return;
+        }
+    }
+    if (event->type == SDL_EVENT_MOUSE_MOTION && screen->overlay_dragging) {
+        int out_w;
+        int out_h;
+        if (!SDL_GetRenderOutputSize(screen->renderer, &out_w, &out_h)) {
+            return;
+        }
+        // Keep the whole widget inside the window: clamp the top-left
+        // corner to [0, out - tex] on both axes (dragging must not
+        // move the widget out of view).
+        int max_x = out_w - screen->fps_overlay.tex_w;
+        int max_y = out_h - screen->fps_overlay.tex_h;
+        // A window smaller than the texture would make the clamp range
+        // negative; fall back to 0 so the widget stays visible
+        if (max_x < 0) {
+            max_x = 0;
+        }
+        if (max_y < 0) {
+            max_y = 0;
+        }
+        int nx = (int) event->motion.x - screen->overlay_drag_dx;
+        int ny = (int) event->motion.y - screen->overlay_drag_dy;
+        if (nx < 0) {
+            nx = 0;
+        } else if (nx > max_x) {
+            nx = max_x;
+        }
+        if (ny < 0) {
+            ny = 0;
+        } else if (ny > max_y) {
+            ny = max_y;
+        }
+        sc_fps_overlay_set_pos(&screen->fps_overlay, nx, ny);
+        sc_screen_render(screen, false);
+        return;
+    }
+    if (event->type == SDL_EVENT_MOUSE_BUTTON_UP
+            && event->button.button == SDL_BUTTON_LEFT
+            && screen->overlay_dragging) {
+        screen->overlay_dragging = false;
+        return;
     }
 
     if (sc_screen_is_relative_mode(screen)

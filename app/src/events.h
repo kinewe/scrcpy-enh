@@ -21,6 +21,10 @@ enum {
     SC_EVENT_AOA_OPEN_ERROR,
     SC_EVENT_DISCONNECTED_ICON_LOADED,
     SC_EVENT_DISCONNECTED_TIMEOUT,
+    // The computer clipboard content changed (detected by polling on
+    // platforms where the SDL clipboard update event is not reliable,
+    // e.g. Windows)
+    SC_EVENT_CLIPBOARD_CHANGED,
 };
 
 bool
