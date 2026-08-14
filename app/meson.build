@@ -145,6 +145,7 @@ if host_machine.system() == 'windows'
     dependencies += cc.find_library('mingw32')
     dependencies += cc.find_library('ws2_32')
     dependencies += cc.find_library('imm32')
+    dependencies += cc.find_library('advapi32')
 endif
 
 check_functions = [

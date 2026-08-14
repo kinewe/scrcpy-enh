@@ -25,6 +25,8 @@ enum {
     // platforms where the SDL clipboard update event is not reliable,
     // e.g. Windows)
     SC_EVENT_CLIPBOARD_CHANGED,
+    // Keyboard layout restore retry (Windows HID keyboard focus handling)
+    SC_EVENT_KEYBOARD_LAYOUT_RESTORE,
 };
 
 bool

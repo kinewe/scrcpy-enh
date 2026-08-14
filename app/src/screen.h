@@ -122,11 +122,6 @@ struct sc_screen {
     // Original keyboard layout (HKL) before the window grabbed focus with a
     // HID keyboard, restored on focus loss.
     void *original_hkl;
-    // English (US) HKL forced while the window has focus. Used on focus loss
-    // to detect whether the new foreground window shares the system-wide
-    // layout (per-app IME disabled) or keeps its own layout (per-app IME
-    // enabled, "use a different input method for each app window").
-    void *en_hkl;
     // Whether the English layout is currently forced on this thread (idempotent
     // focus gain: avoid re-activating the layout on every focus event).
     bool layout_forced;
