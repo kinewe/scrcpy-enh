@@ -955,8 +955,17 @@ public class SurfaceEncoder implements AsyncProcessor {
         int newFps = ABR_FPS_LEVELS[idx - 1];
         fpsProbeFrom = abrFps;
         fpsRecoverOverloads = 0; // fresh probe: fresh overload debounce
-        Ln.i("ABR: fps restore " + abrFps + "->" + newFps + " (stable, gl drop)");
-        capture.setTargetFps(newFps);
+        // Full level = no fps cap: pass 0 to the GL layer (render every
+        // frame, no fixed-interval thinning). abrFps still records the full
+        // level so effectiveMaxFps() (the encoder MediaFormat cap, still
+        // 120) and the client overlay keep reporting it; only the GL
+        // thinning is released. Thinning at the full level used to drop
+        // jittery frames: a real 120fps source was clipped to ~60-80fps
+        // after the first ABR cycle by the fixed 8.33ms interval.
+        int glTargetFps = newFps >= fpsRestoreCeiling() ? 0 : newFps;
+        Ln.i("ABR: fps restore " + abrFps + "->" + newFps
+                + (glTargetFps == 0 ? " (stable, gl unlock)" : " (stable, gl drop)"));
+        capture.setTargetFps(glTargetFps);
         abrFps = newFps;
         fpsProbeUntilNs = nowNs + ABR_FPS_PROBE_WATCH_NS;
         fpsStableSinceNs = 0;
