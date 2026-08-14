@@ -9,8 +9,9 @@
 // 5x7 dot-matrix font: one uint8_t per row, 5 bits per row, least
 // significant bit on the right. Index: 0-9 are the digits, then
 // 10='f', 11='p', 12='s' (also 'S'), 13='M', 14='k', 15='U', 16='B',
-// 17='W', 18='I', 19='F', 20=' ' (space), 21='/' (rendered as '·').
-static const uint8_t FONT[22][7] = {
+// 17='W', 18='I', 19='F', 20=' ' (space), 21='/' (rendered as '·'),
+// 22='L', 23='A', 24='N'.
+static const uint8_t FONT[25][7] = {
     {0x0E, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0E}, // 0
     {0x04, 0x0C, 0x04, 0x04, 0x04, 0x04, 0x0E}, // 1
     {0x0E, 0x11, 0x01, 0x02, 0x04, 0x08, 0x1F}, // 2
@@ -33,6 +34,9 @@ static const uint8_t FONT[22][7] = {
     {0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x10}, // F
     {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}, // ' '
     {0x00, 0x00, 0x0E, 0x0E, 0x0E, 0x00, 0x00}, // '·' middle dot (nicer divider)
+    {0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x1F}, // L
+    {0x0E, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11}, // A
+    {0x11, 0x19, 0x15, 0x13, 0x11, 0x11, 0x11}, // N
 };
 
 #define FONT_SCALE 3
@@ -75,7 +79,13 @@ glyph_of(char c) {
         case ' ':
             return 20;
         case '/':
-            return 21;
+            return 21; // rendered as '·'
+        case 'L':
+            return 22;
+        case 'A':
+            return 23;
+        case 'N':
+            return 24;
         default:
             return -1;
     }
@@ -256,7 +266,7 @@ sc_fps_overlay_on_frame(struct sc_fps_overlay *overlay) {
 
     // "<fps>fps[/<abr_fps>] <bitrate><unit> <mode>"
     // e.g. "60/60fps 15M USB", "60fps 15M USB" (before ABR state)
-    const char *mode = overlay->mode == SC_OVERLAY_MODE_WIFI ? "WIFI" : "USB";
+    const char *mode = overlay->mode == SC_OVERLAY_MODE_WIFI ? "LAN" : "USB";
     char text[48];
     if (overlay->bitrate >= 1000000) {
         if (overlay->abr_fps > 0) {
