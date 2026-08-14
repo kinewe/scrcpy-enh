@@ -7,7 +7,7 @@
 #include <stdint.h>
 #include <sys/types.h>
 
-#define DEVICE_MSG_MAX_SIZE (1 << 18) // 256k
+#define DEVICE_MSG_MAX_SIZE (1 << 28) // 256M (lossless large image clipboard support, must match server MESSAGE_MAX_SIZE)
 // type: 1 byte; length: 4 bytes
 #define DEVICE_MSG_TEXT_MAX_LENGTH (DEVICE_MSG_MAX_SIZE - 5)
 
@@ -15,6 +15,8 @@ enum sc_device_msg_type {
     DEVICE_MSG_TYPE_CLIPBOARD,
     DEVICE_MSG_TYPE_ACK_CLIPBOARD,
     DEVICE_MSG_TYPE_UHID_OUTPUT,
+    DEVICE_MSG_TYPE_IMAGE_CLIPBOARD,
+    DEVICE_MSG_TYPE_ABR_STATE,
 };
 
 struct sc_device_msg {
@@ -31,6 +33,15 @@ struct sc_device_msg {
             uint16_t size;
             uint8_t *data; // owned, to be freed by free()
         } uhid_output;
+        struct {
+            uint8_t *data; // owned, to be freed by free()
+            uint32_t size;
+            char *mimetype; // owned, to be freed by free()
+        } image_clipboard;
+        struct {
+            uint32_t bitrate;
+            uint32_t fps;
+        } abr_state;
     };
 };
 
