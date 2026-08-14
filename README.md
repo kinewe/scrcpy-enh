@@ -1,238 +1,166 @@
-> [!WARNING]
-> **This GitHub repo (<https://github.com/Genymobile/scrcpy>) is the only official
-source for the project. Do not download releases from random websites, even if
-their name contains `scrcpy`.**
+# scrcpy-enh —— scrcpy 增强版
 
-# scrcpy (v4.1)
+> [English](README_EN.md) | 中文
 
-<img src="app/data/scrcpy.svg" width="128" height="128" alt="scrcpy" align="right" />
+基于 [scrcpy v4.1](https://github.com/Genymobile/scrcpy) 的增强构建，面向「电脑 ↔ Android」投屏协同场景。在官方版本之上提供 **ABR 双维自适应、投屏状态控件、图片剪贴板同步、uhid 键盘、USB/WiFi 自动切换** 等实用增强。
 
-_pronounced "**scr**een **c**o**py**"_
+> **v1.0 已发布** —— [Release 下载](https://github.com/kinewe/scrcpy-enh/releases)（zip 含全部运行库，Windows 10/11 解压即用，无需安装）
 
-This application mirrors Android devices (video and audio) connected via USB or
-[TCP/IP](doc/connection.md#tcpip-wireless) and allows control using the
-computer's keyboard and mouse. It does not require _root_ access or an app
-installed on the device. It works on _Linux_, _Windows_, and _macOS_.
+---
 
-[![Linux](https://img.shields.io/badge/Linux-download-orange?style=for-the-badge&logo=linux)](doc/linux.md)&nbsp;
-[![Windows](https://img.shields.io/badge/Windows-download-blue?style=for-the-badge&logo=windows)](doc/windows.md)&nbsp;
-[![macOS](https://img.shields.io/badge/macOS-download-brightgreen?style=for-the-badge&logo=apple)](doc/macos.md)&nbsp;
+## ✨ 功能特性
 
-![screenshot](assets/screenshot-debian-600.jpg)
+| 特性 | 说明 |
+|---|---|
+| 🔄 **投屏循环 + 自动切换** | 双击即用：USB 插着走有线，拔线 5 秒自动切无线，再插回自动切回有线 |
+| ⚡ **ABR 双维自适应** | 码率 + 帧率双维动态调整：压力大自动降档保跟手，压力消失快速恢复满血 |
+| 📊 **投屏状态控件** | 右上角实时显示 实际/档位帧率 + 码率 + 连接模式（Alt+拖动，Ctrl+F 开关） |
+| 🎹 **uhid 键盘** | 电脑键盘被手机识别为物理键盘，可直接打中文（获焦自动切英文布局防输入法干扰，失焦自动恢复） |
+| 📋 **图片剪贴板同步** | 电脑复制图片/文本 → 自动同步到手机剪贴板 → 微信/QQ 长按粘贴（合并 scrcpy PR #6676） |
+| 🖼️ **Ctrl+G 存相册** | 投屏中一键把剪贴板原图保存到手机相册 |
+| 📐 **动态规格分配** | 插线时自动读取设备分辨率/刷新率，动态分配最优串流规格 |
 
-It focuses on:
+---
 
- - **lightness**: native, displays only the device screen
- - **performance**: 30~120fps, depending on the device
- - **quality**: 1920×1080 or above
- - **low latency**: [35~70ms][lowlatency]
- - **low startup time**: ~1 second to display the first image
- - **non-intrusiveness**: nothing is left installed on the Android device
- - **user benefits**: no account, no ads, no internet required
- - **freedom**: free and open source software
+## 🚀 快速开始
 
-[lowlatency]: https://github.com/Genymobile/scrcpy/pull/646
+1. **下载**：从 [Release 页面](https://github.com/kinewe/scrcpy-enh/releases) 下载最新 zip（约 65MB），解压到任意目录
+2. **手机准备**：
+   - 首次使用开启「开发者选项 → USB 调试」（小米/红米需额外开启「USB 调试（安全设置）」）
+   - USB 线连接电脑（或开启「无线调试」）
+3. **启动**：双击 `手机投屏.bat`
+4. 手机弹出 USB 调试授权 → 允许 → 投屏开始
 
-Its features include:
- - [audio forwarding](doc/audio.md) (Android 11+)
- - [recording](doc/recording.md)
- - [virtual display](doc/virtual-display.md)
- - mirroring with [Android device screen off](doc/device.md#turn-screen-off)
- - [copy-paste](doc/control.md#copy-paste) in both directions
- - [configurable quality](doc/video.md)
- - [camera mirroring](doc/camera.md) (Android 12+)
- - [mirroring as a webcam (V4L2)](doc/v4l2.md) (Linux-only)
- - physical [keyboard][hid-keyboard] and [mouse][hid-mouse] simulation (HID)
- - [gamepad](doc/gamepad.md) support
- - [OTG mode](doc/otg.md)
- - and more…
+---
 
-[hid-keyboard]: doc/keyboard.md#physical-keyboard-simulation
-[hid-mouse]: doc/mouse.md#physical-mouse-simulation
+## 📖 详细使用指南
 
-## Prerequisites
+### 1. 连接方式与自动切换
 
-The Android device requires at least API 21 (Android 5.0).
+`手机投屏.bat` 内置投屏循环：
 
-[Audio forwarding](doc/audio.md) is supported for API >= 30 (Android 11+).
+| 场景 | 行为 |
+|---|---|
+| USB 插着 | 走有线（高清规格，见下） |
+| 拔掉 USB | 5 秒内自动切换无线（WiFi 直连，需先配置） |
+| 重新插回 USB | 自动切回有线 |
+| 按 Q 或关窗 | 退出投屏 |
 
-Make sure you [enabled USB debugging][enable-adb] on your device(s).
+**无线连接配置**（可选）：在解压目录新建 `config.txt`，写入手机的无线调试地址，如 `192.168.31.100:5555`。手机端「开发者选项 → 无线调试」可看到地址（首次需配对）。
 
-[enable-adb]: https://developer.android.com/studio/debug/dev-options#enable
+### 2. 动态规格分配
 
-On some devices (especially Xiaomi), you might get the following error:
+插线时脚本自动读取设备参数分配规格（无需手动配置）：
+
+| 连接 | 分辨率上限 | 帧率上限 | 码率 |
+|---|---|---|---|
+| USB 有线 | 2560（按设备分辨率/刷新率动态） | 120 | 15-80M 动态 |
+| WiFi 无线 | 1920 | 60 | 15M |
+
+### 3. 投屏状态控件
+
+投屏窗口右上角实时显示：
 
 ```
-Injecting input events requires the caller (or the source of the instrumentation, if any) to have the INJECT_EVENTS permission.
+10/60fps 15M USB
+↑实际/档位 ↑码率 ↑模式
 ```
 
-In that case, you need to enable [an additional option][control] `USB debugging
-(Security Settings)` (this is an item different from `USB debugging`) to control
-it using a keyboard and mouse. Rebooting the device is necessary once this
-option is set.
+| 操作 | 功能 |
+|---|---|
+| **Alt + 左键拖动** | 移动控件位置（不会拖出窗口） |
+| **Ctrl+F** | 显示/隐藏控件 |
 
-[control]: https://github.com/Genymobile/scrcpy/issues/70#issuecomment-373286323
+**关于「实际帧率」**：实际帧率 = 手机当前送来的帧数（系统省电降频时静止画面帧率低是正常现象，滑动/动画自动回升）；档位 = 当前编码目标上限。
 
-Note that USB debugging is not required to run scrcpy in [OTG mode](doc/otg.md).
+### 4. 快捷键一览
 
+| 快捷键 | 功能 |
+|---|---|
+| `Ctrl+F` | 开关状态控件 |
+| `Ctrl+G` | 剪贴板原图保存到手机相册 |
+| `Ctrl+V` | 电脑剪贴板内容粘贴到手机（图片自动进手机剪贴板） |
+| `Alt + 拖动` | 移动状态控件 |
+| `F11` | 全屏切换 |
+| `Q` | 退出投屏 |
 
-## Get the app
+### 5. 图片剪贴板同步
 
- - [Linux](doc/linux.md)
- - [Windows](doc/windows.md) (read [how to run](doc/windows.md#run))
- - [macOS](doc/macos.md)
+1. 电脑上复制任意图片（`Ctrl+C`，来自浏览器/文件管理器/截图等）
+2. 剪贴板内容**自动同步**到手机剪贴板（无需额外操作）
+3. 手机微信/QQ 输入框**长按 → 粘贴**即可发送
+4. 按 `Ctrl+G` 可将剪贴板原图直接存入手机相册
 
+> 图片通过控制通道以原始格式传输，上限 256MB；BMP 无损直传。
 
-## Must-know tips
+### 6. uhid 键盘与输入法
 
- - [Reducing resolution](doc/video.md#size) may greatly improve performance
-   (`scrcpy -m1024`)
- - [_Right-click_](doc/mouse.md#mouse-bindings) triggers `BACK`
- - [_Middle-click_](doc/mouse.md#mouse-bindings) triggers `HOME`
- - <kbd>Alt</kbd>+<kbd>f</kbd> toggles [fullscreen](doc/window.md#fullscreen)
- - There are many other [shortcuts](doc/shortcuts.md)
+投屏窗口获焦时，电脑键盘作为物理键盘直接输入手机：
+- **获焦自动切英文布局**：防止中文输入法拦截按键（Shift 弹拼音框等问题）
+- **失焦/退出自动恢复**：切回你原来的中文输入法
 
+无需在手机上打开软键盘即可直接打字（含中文）。
 
-## Usage examples
+---
 
-There are a lot of options, [documented](#user-documentation) in separate pages.
-Here are just some common examples.
+## 🤔 常见问题（FAQ）
 
- - Capture the screen in H.265 (better quality), limit the size to 1920, limit
-   the frame rate to 60fps, disable audio, and control the device by simulating
-   a physical keyboard:
+**Q：为什么帧率会变化？有时 120 有时 60 甚至 30？**
+A：ABR 自适应在动态调整。手机端内容静止时系统省电降频（帧率低是正常省电行为）；复杂动画压力大时自动降档保流畅（不卡顿优先）；压力消失后自动恢复满血。这是特性不是故障。
 
-    ```bash
-    scrcpy --video-codec=h265 --max-size=1920 --max-fps=60 --no-audio --keyboard=uhid
-    scrcpy --video-codec=h265 -m1920 --max-fps=60 --no-audio -K  # short version
-    ```
+**Q：投屏时输入法变成英文了？**
+A：正常。uhid 键盘获焦时强制英文布局防止输入法干扰按键，**失焦或退出投屏会自动恢复**你的中文输入法。
 
- - Start VLC in a new virtual display (separate from the device display):
+**Q：为什么无线投屏没有有线清晰？**
+A：无线规格（1920/60/15M）低于有线（2560/120/动态码率）——WiFi 传输稳定性限制。追求画质请用 USB 线。
 
-    ```bash
-    scrcpy --new-display=1920x1080 --start-app=org.videolan.vlc
-    ```
+**Q：手机没反应 / 提示找不到设备？**
+A：确认 USB 调试已开启并在手机上授权；无线模式确认与电脑同一 WiFi 且地址正确。
 
- - Start VLC in a new _flex_ display using H.265 with a bitrate of 16 Mbps,
-   while keeping the display active so it does not turn off:
+**Q：与官方 scrcpy 有什么区别？**
+A：本版在官方 v4.1 之上新增：ABR 自适应、状态控件、USB/WiFi 自动切换、图片剪贴板（上游 PR #6676 合并）、Ctrl+G 存相册、输入法布局自动切换。命令行参数与官方兼容。
 
-    ```bash
-    scrcpy --new-display -x --keep-active --start-app=org.videolan.vlc --video-codec=h265 -b16M
-    ```
+---
 
- - Record the device camera in H.265 at 1920x1080 (and microphone) to an MP4
-   file:
+## 🔨 从源码构建（Windows）
 
-    ```bash
-    scrcpy --video-source=camera --video-codec=h265 --camera-size=1920x1080 --record=file.mp4
-    ```
+### 环境
+- MSYS2（mingw64：gcc、meson、ninja、SDL3、ffmpeg 等）
+- JDK 17 + Gradle（server 构建）
+- Android SDK（server 依赖 android.jar）
 
- - Capture the device front camera and expose it as a webcam on the computer (on
-   Linux):
+### 步骤
+```bash
+# 1. server（Java）
+cd server
+export JAVA_HOME=<jdk17 路径>
+gradle --no-daemon assemble        # 产物: server/build/outputs/apk/debug/server-debug.apk
 
-    ```bash
-    scrcpy --video-source=camera --camera-size=1920x1080 --camera-facing=front --v4l2-sink=/dev/video2 --no-playback
-    ```
+# 2. client（C）
+mkdir build && cd build
+meson setup .. -Dprebuilt_server=../server/build/outputs/apk/debug/server-debug.apk
+ninja                              # 产物: app/scrcpy.exe
 
- - Control the device without mirroring by simulating a physical keyboard and
-   mouse (USB debugging not required):
+# 3. 打包运行目录
+# scrcpy.exe + scrcpy-server + MSYS2 依赖 dll + adb.exe + 手机投屏.bat
+```
 
-    ```bash
-    scrcpy --otg
-    ```
+### 项目结构
+```
+app/          客户端（C，SDL3 + ffmpeg）
+server/       服务端（Java，MediaCodec 编码 + ABR 自适应核心）
+packaging/    手机投屏.bat 启动脚本
+```
 
- - Control the device using gamepads plugged into the computer:
+---
 
-    ```bash
-    scrcpy --gamepad=uhid
-    scrcpy -G  # short version
-    ```
+## 📄 许可证
 
-## User documentation
+本项目是 scrcpy 的派生作品，遵循其 [Apache License 2.0](LICENSE) 开源许可。ABR 自适应、状态控件、自动切换、图片剪贴板等增强代码同以 Apache 2.0 授权。图片剪贴板功能合并自上游 PR [#6676](https://github.com/Genymobile/scrcpy/pull/6676)。
 
-The application provides a lot of features and configuration options. They are
-documented in the following pages:
+---
 
- - [Connection](doc/connection.md)
- - [Video](doc/video.md)
- - [Audio](doc/audio.md)
- - [Control](doc/control.md)
- - [Keyboard](doc/keyboard.md)
- - [Mouse](doc/mouse.md)
- - [Gamepad](doc/gamepad.md)
- - [Device](doc/device.md)
- - [Window](doc/window.md)
- - [Recording](doc/recording.md)
- - [Virtual display](doc/virtual-display.md)
- - [Tunnels](doc/tunnels.md)
- - [OTG](doc/otg.md)
- - [Camera](doc/camera.md)
- - [Video4Linux](doc/v4l2.md)
- - [Shortcuts](doc/shortcuts.md)
+## 🙏 致谢
 
-
-## Resources
-
- - [FAQ](FAQ.md)
- - [Translations][wiki] (not necessarily up to date)
- - [Build instructions](doc/build.md)
- - [Developers](doc/develop.md)
- - [Verify release signatures](doc/verify-release.md)
-
-[wiki]: https://github.com/Genymobile/scrcpy/wiki
-
-
-## Articles
-
-- [Introducing scrcpy][article-intro]
-- [Scrcpy now works wirelessly][article-tcpip]
-- [Scrcpy 2.0, with audio][article-scrcpy2]
-
-[article-intro]: https://blog.rom1v.com/2018/03/introducing-scrcpy/
-[article-tcpip]: https://www.genymotion.com/blog/open-source-project-scrcpy-now-works-wirelessly/
-[article-scrcpy2]: https://blog.rom1v.com/2023/03/scrcpy-2-0-with-audio/
-
-## Contact
-
-You can open an [issue] for bug reports, feature requests or general questions.
-
-For bug reports, please read the [FAQ](FAQ.md) first, you might find a solution
-to your problem immediately.
-
-[issue]: https://github.com/Genymobile/scrcpy/issues
-
-You can also use:
-
- - Reddit: [`r/scrcpy`](https://www.reddit.com/r/scrcpy)
- - BlueSky: [`@scrcpy.bsky.social`](https://bsky.app/profile/scrcpy.bsky.social)
- - Twitter: [`@scrcpy_app`](https://twitter.com/scrcpy_app)
-
-
-## Donate
-
-I'm [@rom1v](https://github.com/rom1v), the author and maintainer of _scrcpy_.
-
-If you appreciate this application, you can [support my open source
-work][donate]:
- - [GitHub Sponsors](https://github.com/sponsors/rom1v)
- - [Liberapay](https://liberapay.com/rom1v/)
- - [PayPal](https://paypal.me/rom2v)
-
-[donate]: https://blog.rom1v.com/about/#support-my-open-source-work
-
-## License
-
-    Copyright (C) 2018 Genymobile
-    Copyright (C) 2018-2026 Romain Vimont
-
-    Licensed under the Apache License, Version 2.0 (the "License");
-    you may not use this file except in compliance with the License.
-    You may obtain a copy of the License at
-
-        http://www.apache.org/licenses/LICENSE-2.0
-
-    Unless required by applicable law or agreed to in writing, software
-    distributed under the License is distributed on an "AS IS" BASIS,
-    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-    See the License for the specific language governing permissions and
-    limitations under the License.
+- [Genymobile/scrcpy](https://github.com/Genymobile/scrcpy) —— 优秀的开源投屏工具
+- 所有参与测试与反馈的用户
