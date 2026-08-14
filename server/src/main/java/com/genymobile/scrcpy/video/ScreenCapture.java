@@ -118,18 +118,27 @@ public class ScreenCapture extends SurfaceCapture {
         }
 
         Size inputSize;
+        OpenGLFilter glFilter;
         if (transform != null) {
             // If there is a filter, it must receive the full display content
             inputSize = displayInfo.getSize();
-            assert glRunner == null;
-            OpenGLFilter glFilter = new AffineOpenGLFilter(transform);
-            glRunner = new OpenGLRunner(glFilter);
-            surface = glRunner.start(inputSize, videoSize, surface);
-            glRunner.setTargetFps(currentTargetFps);
+            glFilter = new AffineOpenGLFilter(transform);
         } else {
-            // If there is no filter, the display must be rendered at target video size directly
+            // No crop, unlocked orientation and no angle: the display is
+            // still rendered at the target video size directly, but the
+            // frames must go through the GL layer anyway so that the ABR
+            // fps thinning (capture.setTargetFps) is always effective.
+            // Without the GL layer, setTargetFps() would be a silent no-op:
+            // the encoder would keep the full frame rate while the ABR
+            // state reported to the client would show a downgraded fps
+            // level (overlay "actual/level" mismatch).
             inputSize = videoSize;
+            glFilter = new AffineOpenGLFilter(AffineMatrix.IDENTITY);
         }
+        assert glRunner == null;
+        glRunner = new OpenGLRunner(glFilter);
+        surface = glRunner.start(inputSize, videoSize, surface);
+        glRunner.setTargetFps(currentTargetFps);
 
         try {
             virtualDisplay = ServiceManager.getDisplayManager()
