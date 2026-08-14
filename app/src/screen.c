@@ -823,8 +823,7 @@ static void
 sc_screen_apply_keyboard_layout(struct sc_screen *screen, bool english);
 
 static void
-sc_screen_restore_global_keyboard_layout(struct sc_screen *screen,
-                                         bool exiting);
+sc_screen_restore_global_keyboard_layout(struct sc_screen *screen);
 #endif
 
 void
@@ -859,25 +858,8 @@ sc_screen_destroy(struct sc_screen *screen) {
     // No-op when the layout was already restored (layout_forced == false)
     // or never forced (original_hkl == NULL).
     bool restore_layout = screen->hid_keyboard && screen->layout_forced;
-    bool exit_foreground = false;
     if (restore_layout) {
-        // If the scrcpy window is still the foreground window (quit while
-        // focused), the scrcpy thread is the foreground thread, so
-        // activating the original layout below directly restores the
-        // system input language: keep the foreground-verified restore.
-        // Otherwise (device unplugged, focus elsewhere), the scrcpy thread
-        // activation cannot reach the system input language and the
-        // foreground layout is unrelated to it: skip it (it would also
-        // spoil the exit-path confirmation below) and restore
-        // deterministically via the input language hotkey after the
-        // window is destroyed.
-        HWND hwnd = (HWND) SDL_GetPointerProperty(
-                SDL_GetWindowProperties(screen->window),
-                SDL_PROP_WINDOW_WIN32_HWND_POINTER, NULL);
-        exit_foreground = hwnd && GetForegroundWindow() == hwnd;
-        if (exit_foreground) {
-            sc_screen_apply_keyboard_layout(screen, false);
-        }
+        sc_screen_apply_keyboard_layout(screen, false);
     }
 #endif
     SDL_DestroyWindow(screen->window);
@@ -889,14 +871,8 @@ sc_screen_destroy(struct sc_screen *screen) {
     // foreground next, so re-run the verified system-level restore now
     // that it is foreground. No-op when the system input language is
     // already restored (e.g. by the broadcast).
-    //
-    // If the window was not the foreground window at exit time, re-run the
-    // system-level restore in exit mode: the system input language is
-    // known to still be the forced English one, so it is restored
-    // deterministically via the input language hotkey (see the block
-    // comment of sc_screen_restore_global_keyboard_layout()).
     if (restore_layout) {
-        sc_screen_restore_global_keyboard_layout(screen, !exit_foreground);
+        sc_screen_restore_global_keyboard_layout(screen);
     }
 #endif
     sc_fps_counter_destroy(&screen->fps_counter);
@@ -1305,19 +1281,6 @@ sc_disconnect_on_timeout(struct sc_disconnect *d, void *userdata) {
 //     level), so the switch does not depend on any window accepting the
 //     broadcast. When the hotkey is disabled or uses a custom key
 //     sequence, fall back to the broadcast alone.
-//
-// On exit without focus (device unplugged, window closed while unfocused),
-// the foreground thread layout cannot represent the system input language:
-// it already has the original layout, so the foreground verification above
-// would pass without the language bar actually being restored (without
-// focus, ActivateKeyboardLayout on the scrcpy thread cannot reach the
-// system, and the broadcast may be ignored). The system input language is
-// then known to still be the forced English one, so the exit mode restores
-// it deterministically: inject the input language hotkey the exact number
-// of times that cycles the layout list from English to the original
-// language, without any foreground polling. The hotkey switch is
-// system-level and the scrcpy thread layout follows it, so
-// GetKeyboardLayout(0) confirms the result.
 
 // Read the "switch input language" hotkey setting:
 // HKCU\Keyboard Layout\Toggle value "Hotkey":
@@ -1400,42 +1363,33 @@ sc_screen_find_lang_index(const HKL *layouts, UINT count, WORD lang) {
 }
 
 static void
-sc_screen_restore_global_keyboard_layout(struct sc_screen *screen,
-                                         bool exiting) {
+sc_screen_restore_global_keyboard_layout(struct sc_screen *screen) {
     HKL original = (HKL) screen->original_hkl;
     if (!original) {
         return;
     }
     WORD target_lang = PRIMARYLANGID(LOWORD((DWORD_PTR) original));
 
-    if (!exiting) {
-        // Layer 1: broadcast the same message the language bar uses. On
-        // most systems every window accepts it, which restores both the
-        // foreground thread and all other windows.
-        PostMessage(HWND_BROADCAST, WM_INPUTLANGCHANGEREQUEST,
-                    INPUTLANGCHANGE_FORWARD, (LPARAM) original);
+    // Layer 1: broadcast the same message the language bar uses. On most
+    // systems every window accepts it, which restores both the foreground
+    // thread and all other windows.
+    PostMessage(HWND_BROADCAST, WM_INPUTLANGCHANGEREQUEST,
+                INPUTLANGCHANGE_FORWARD, (LPARAM) original);
 
-        // The broadcast is processed asynchronously: poll the foreground
-        // thread for a short time. It defines the system input language,
-        // so once it matches, the restore is complete.
-        if (sc_screen_wait_lang(target_lang, 300, 25)) {
-            LOGI("Keyboard layout globally restored to 0x%08lx (broadcast "
-                 "WM_INPUTLANGCHANGEREQUEST)",
-                 (unsigned long) (uintptr_t) original);
-            return;
-        }
-
-        LOGW("WM_INPUTLANGCHANGEREQUEST did not restore the system input "
-             "language (foreground 0x%03x != target 0x%03x); falling back "
-             "to the input language hotkey",
-             sc_screen_current_lang_id(), target_lang);
-    } else {
-        // Exit mode: see the block comment above. The system input
-        // language is known to still be the forced English one, restore
-        // it deterministically with the hotkey below.
-        LOGI("Exiting without focus: restoring the system input language "
-             "deterministically via the input language hotkey");
+    // The broadcast is processed asynchronously: poll the foreground
+    // thread for a short time. It defines the system input language, so
+    // once it matches, the restore is complete.
+    if (sc_screen_wait_lang(target_lang, 300, 25)) {
+        LOGI("Keyboard layout globally restored to 0x%08lx (broadcast "
+             "WM_INPUTLANGCHANGEREQUEST)",
+             (unsigned long) (uintptr_t) original);
+        return;
     }
+
+    LOGW("WM_INPUTLANGCHANGEREQUEST did not restore the system input "
+         "language (foreground 0x%03x != target 0x%03x); falling back to "
+         "the input language hotkey",
+         sc_screen_current_lang_id(), target_lang);
 
     // Layer 2: simulate the system input language hotkey. It cycles the
     // input language at kernel level, independently of any window. The
@@ -1452,12 +1406,6 @@ sc_screen_restore_global_keyboard_layout(struct sc_screen *screen,
     } else {
         // Hotkey disabled or a custom key sequence: do not inject keys,
         // keep the broadcast as the only mechanism.
-        if (exiting) {
-            // The exit mode sent no broadcast yet: post it now as the
-            // broadcast-only fallback.
-            PostMessage(HWND_BROADCAST, WM_INPUTLANGCHANGEREQUEST,
-                        INPUTLANGCHANGE_FORWARD, (LPARAM) original);
-        }
         LOGW("Input language hotkey is disabled or custom (toggle = %u); "
              "keep broadcast-only restore", hotkey);
         return;
@@ -1475,34 +1423,19 @@ sc_screen_restore_global_keyboard_layout(struct sc_screen *screen,
         return;
     }
     count = GetKeyboardLayoutList(count, layouts);
-    // Starting position in the layout cycle: in exit mode, the system
-    // input language is known to be the forced English layout (scrcpy
-    // forced it while foreground and nothing restored the system since),
-    // so start from it deterministically instead of reading the unrelated
-    // foreground layout.
-    WORD start_lang = exiting
-        ? (screen->en_hkl
-               ? PRIMARYLANGID(LOWORD((DWORD_PTR) screen->en_hkl))
-               : LANG_ENGLISH)
-        : sc_screen_current_lang_id();
-    int start_index = sc_screen_find_lang_index(layouts, count, start_lang);
+    int current_index = sc_screen_find_lang_index(layouts, count,
+                                                  sc_screen_current_lang_id());
     int target_index = sc_screen_find_lang_index(layouts, count, target_lang);
-    if (start_index < 0 || target_index < 0) {
+    if (current_index < 0 || target_index < 0) {
         free(layouts);
         LOGW("Current or target language missing from the layout cycle");
         return;
     }
-    int steps = (target_index - start_index + (int) count) % (int) count;
+    int steps = (target_index - current_index + (int) count) % (int) count;
     free(layouts);
     if (steps <= 0) {
-        if (exiting) {
-            // The forced and original layouts share the same language:
-            // nothing to cycle.
-            LOGI("System input language already 0x%03x (same language as "
-                 "the forced layout); no hotkey press needed", target_lang);
-        }
-        // Otherwise: should not happen (the wait above already failed),
-        // but keep a safe guard against an endless loop.
+        // Should not happen (the wait above already failed), but keep a
+        // safe guard against an endless loop.
         return;
     }
     // At most one full cycle minus the current position; never send more
@@ -1510,33 +1443,6 @@ sc_screen_restore_global_keyboard_layout(struct sc_screen *screen,
     int cap = MIN((int) count - 1, 8);
     if (steps > cap) {
         steps = cap;
-    }
-
-    if (exiting) {
-        // Deterministic exit restore: inject the computed number of
-        // presses without any foreground polling (the foreground window
-        // is unrelated). The hotkey switch is system-level and the scrcpy
-        // thread layout follows it, so GetKeyboardLayout(0) reflects the
-        // result after each press.
-        for (int i = 0; i < steps; ++i) {
-            sc_screen_send_toggle_hotkey(ctrl_shift);
-            // Let the system process the hotkey before the next press.
-            Sleep(50);
-            WORD now = PRIMARYLANGID(
-                LOWORD((DWORD_PTR) GetKeyboardLayout(0)));
-            if (now == target_lang) {
-                LOGI("Keyboard layout globally restored to 0x%08lx via %s "
-                     "hotkey (%d press(es)) (exit path)",
-                     (unsigned long) (uintptr_t) original,
-                     ctrl_shift ? "Ctrl+Shift" : "Alt+Shift", i + 1);
-                return;
-            }
-        }
-        LOGW("Could not restore the system input language 0x%03x via the "
-             "hotkey after exit (scrcpy thread 0x%03x)",
-             target_lang,
-             PRIMARYLANGID(LOWORD((DWORD_PTR) GetKeyboardLayout(0))));
-        return;
     }
 
     for (int i = 0; i < steps; ++i) {
@@ -1657,7 +1563,7 @@ sc_screen_apply_keyboard_layout(struct sc_screen *screen, bool english) {
              ime_open ? "open (Chinese IME usable)" : "closed or unavailable");
         // Restore the system-wide layout (browser and other windows), not
         // only the scrcpy thread's layout.
-        sc_screen_restore_global_keyboard_layout(screen, false);
+        sc_screen_restore_global_keyboard_layout(screen);
     }
 }
 #endif
