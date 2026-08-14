@@ -8,8 +8,8 @@
 
 // 5x7 dot-matrix font: one uint8_t per row, 5 bits per row, least
 // significant bit on the right. Index: 0-9 are the digits, then
-// 10='f', 11='p', 12='s', 13='M', 14='k', 15='U', 16='B', 17='W',
-// 18='I', 19='F', 20=' ' (space), 21='/' (rendered as '·').
+// 10='f', 11='p', 12='s' (also 'S'), 13='M', 14='k', 15='U', 16='B',
+// 17='W', 18='I', 19='F', 20=' ' (space), 21='/' (rendered as '·').
 static const uint8_t FONT[22][7] = {
     {0x0E, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0E}, // 0
     {0x04, 0x0C, 0x04, 0x04, 0x04, 0x04, 0x0E}, // 1
@@ -56,6 +56,7 @@ glyph_of(char c) {
         case 'p':
             return 11;
         case 's':
+        case 'S': // same 5x7 glyph as 's', no dedicated capital bitmap
             return 12;
         case 'M':
             return 13;
@@ -164,6 +165,7 @@ sc_fps_overlay_init(struct sc_fps_overlay *overlay, SDL_Renderer *renderer) {
     overlay->bitrate = 0;
     overlay->abr_fps = 0;
     overlay->abr_dirty = false;
+    overlay->visible = true;
     overlay->mode = SC_OVERLAY_MODE_USB;
     overlay->pos_x = -1;
     overlay->pos_y = -1;
@@ -195,6 +197,16 @@ void
 sc_fps_overlay_set_pos(struct sc_fps_overlay *overlay, int x, int y) {
     overlay->pos_x = x;
     overlay->pos_y = y;
+}
+
+bool
+sc_fps_overlay_is_visible(const struct sc_fps_overlay *overlay) {
+    return overlay->visible;
+}
+
+void
+sc_fps_overlay_set_visible(struct sc_fps_overlay *overlay, bool visible) {
+    overlay->visible = visible;
 }
 
 void

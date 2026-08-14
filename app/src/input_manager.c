@@ -1263,6 +1263,16 @@ sc_input_manager_process_key(struct sc_input_manager *im,
         return;
     }
 
+    // Ctrl+F: toggle the fps overlay visibility. Same interception pattern
+    // as Ctrl+G: consumed by the client, never forwarded to the device, and
+    // not blocked by a Chinese IME. F matches "fps" for easy recall.
+    if (down && !repeat && ctrl && !shift
+            && !(event->mod & SDL_KMOD_ALT) && !(event->mod & SDL_KMOD_GUI)
+            && sdl_keycode == SDLK_F) {
+        sc_screen_toggle_fps_overlay(im->screen);
+        return;
+    }
+
     // Shortcuts that do not involve the MOD key
     switch (sdl_keycode) {
         case SDLK_F11:

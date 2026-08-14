@@ -225,6 +225,10 @@ sc_screen_hide_window(struct sc_screen *screen);
 void
 sc_screen_toggle_fullscreen(struct sc_screen *screen);
 
+// toggle the fps overlay visibility (Ctrl+F); session-only state
+void
+sc_screen_toggle_fps_overlay(struct sc_screen *screen);
+
 // resize window to optimal size (remove black borders)
 void
 sc_screen_resize_to_fit(struct sc_screen *screen);

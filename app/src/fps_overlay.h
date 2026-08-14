@@ -21,6 +21,7 @@ struct sc_fps_overlay {
     int bitrate;               // current ABR bitrate (server-reported)
     int abr_fps;               // ABR target fps level (server-reported)
     bool abr_dirty;            // bitrate or mode changed, re-render needed
+    bool visible;              // show/hide toggle (Ctrl+F), session-only memory
     enum sc_overlay_mode mode; // connection mode: USB or WIFI
     int pos_x;                 // overlay top-left x (logical coords), -1 = default top-right
     int pos_y;                 // overlay top-left y (logical coords), -1 = default top-right
@@ -44,5 +45,9 @@ void sc_fps_overlay_get_pos(struct sc_fps_overlay *overlay, int out_w,
                             int *x, int *y);
 // set the overlay position (Alt+drag to reposition)
 void sc_fps_overlay_set_pos(struct sc_fps_overlay *overlay, int x, int y);
+// get the current visibility (toggled by Ctrl+F)
+bool sc_fps_overlay_is_visible(const struct sc_fps_overlay *overlay);
+// set the visibility (toggled by Ctrl+F); a hidden overlay is not rendered
+void sc_fps_overlay_set_visible(struct sc_fps_overlay *overlay, bool visible);
 
 #endif

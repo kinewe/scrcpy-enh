@@ -312,7 +312,10 @@ sc_screen_render(struct sc_screen *screen, bool update_content_rect) {
     }
 
 end:
-    sc_fps_overlay_draw(&screen->fps_overlay, renderer);
+    // a hidden overlay (Ctrl+F toggle) must not be rendered at all
+    if (sc_fps_overlay_is_visible(&screen->fps_overlay)) {
+        sc_fps_overlay_draw(&screen->fps_overlay, renderer);
+    }
     sc_sdl_render_present(renderer);
 }
 
@@ -1140,6 +1143,16 @@ sc_screen_toggle_fullscreen(struct sc_screen *screen) {
     }
 
     LOGD("Requested %s mode", req_fullscreen ? "fullscreen" : "windowed");
+}
+
+void
+sc_screen_toggle_fps_overlay(struct sc_screen *screen) {
+    struct sc_fps_overlay *overlay = &screen->fps_overlay;
+    bool visible = !sc_fps_overlay_is_visible(overlay);
+    sc_fps_overlay_set_visible(overlay, visible);
+    LOGI("fps overlay %s", visible ? "shown" : "hidden");
+    // repaint immediately so the toggle takes effect at once
+    sc_screen_render(screen, false);
 }
 
 void
