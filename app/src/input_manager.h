@@ -29,6 +29,8 @@ struct sc_input_manager {
     struct sc_mouse_bindings mouse_bindings;
     bool legacy_paste;
     bool clipboard_autosync;
+    bool clipboard_sync;
+    bool suppress_start_push;
 
     uint16_t sdl_shortcut_mods;
 
@@ -62,6 +64,8 @@ struct sc_input_manager_params {
     struct sc_mouse_bindings mouse_bindings;
     bool legacy_paste;
     bool clipboard_autosync;
+    bool clipboard_sync;
+    bool clipboard_push_on_start;
     uint8_t shortcut_mods; // OR of enum sc_shortcut_mod values
 };
 
@@ -72,5 +76,19 @@ sc_input_manager_init(struct sc_input_manager *im,
 void
 sc_input_manager_handle_event(struct sc_input_manager *im,
                               const SDL_Event *event);
+
+// Send image clipboard from computer to device
+bool
+sc_input_manager_set_device_image_clipboard(struct sc_input_manager *im, bool paste,
+                                           uint64_t sequence);
+
+// Mark that the computer clipboard was set by a reverse synchronization
+// (device -> computer). The next SDL_EVENT_CLIPBOARD_UPDATE must be ignored
+// by the input manager, to avoid an infinite synchronization loop
+// (computer -> device -> computer -> ...).
+// Must be called on the main thread, right after setting the computer
+// clipboard with SDL_SetClipboardText()/SDL_SetClipboardData().
+void
+sc_input_manager_mark_clipboard_reverse_sync(void);
 
 #endif

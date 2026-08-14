@@ -56,7 +56,7 @@ sc_gamepad_uhid_send_close(struct sc_gamepad_uhid *gamepad,
                            const struct sc_hid_close *hid_close) {
     struct sc_control_msg msg;
     msg.type = SC_CONTROL_MSG_TYPE_UHID_DESTROY;
-    msg.uhid_create.id = hid_close->hid_id;
+    msg.uhid_destroy.id = hid_close->hid_id;
 
     if (!sc_controller_push_msg(gamepad->controller, &msg)) {
         LOGE("Could not push UHID_DESTROY message (gamepad)");

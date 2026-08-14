@@ -8,11 +8,126 @@
 #include "android/input.h"
 #include "android/keycodes.h"
 #include "events.h"
+#include "image_convert.h"
 #include "input_events.h"
 #include "screen.h"
 #include "shortcut_mod.h"
 #include "util/log.h"
 #include "util/sdl.h"
+#include "util/thread.h"
+
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
+// Compress BMP clipboard images larger than this threshold to JPEG (quality 95)
+// before sending, to keep control messages small. 16MB keeps the common
+// case lossless (BMP sent as-is, converted to PNG by the server); only
+// very large BMPs are compressed to stay within the control message limit
+// (SC_CONTROL_MSG_MAX_SIZE = 256MB). Serialization allocates exactly the
+// message size on demand, so large messages cost transient heap memory
+// instead of a static 256MB buffer.
+#define SC_IMAGE_CLIPBOARD_COMPRESS_THRESHOLD (192 * 1024 * 1024) // 192MB (lossless: only a safety net near the 256MB message limit)
+
+// Interval of the Windows clipboard polling timer
+#define SC_CLIPBOARD_WATCH_INTERVAL_MS 300
+
+// On Windows, SDL3 does not send SDL_EVENT_CLIPBOARD_UPDATE when the clipboard
+// is changed by another application (it is only checked when the window gains
+// focus), so the clipboard sequence number is polled by a timer.
+//
+// Loop suppression: when the device clipboard is synchronized to the computer
+// (reverse synchronization, set by the receiver tasks), the computer clipboard
+// is modified, which would trigger a new synchronization back to the device
+// (computer -> device -> computer -> ...). To prevent this infinite loop, the
+// reverse synchronization records the Windows clipboard sequence number right
+// after setting it; any clipboard update while the sequence number is still
+// unchanged is ignored (the content is still the one set by the reverse
+// synchronization). As soon as the user copies something else, the sequence
+// number changes and the suppression is released.
+//
+// Only accessed from the main thread: recorded by the receiver clipboard tasks
+// (which run on the main thread) and consumed by the input manager event loop.
+#ifdef _WIN32
+static uint32_t clipboard_reverse_sync_seq; // 0 = no reverse sync pending
+// Last observed Windows clipboard sequence number; only accessed from the SDL
+// timer thread. Stored globally (not in the input manager) so that the timer
+// callback stays valid even after the input manager is destroyed.
+static uint32_t clipboard_poll_sequence;
+// Windows clipboard sequence number of the last content pushed to the device
+// (by the automatic clipboard sync, a manual MOD+Shift+C, Ctrl+v, or a
+// reverse synchronization). 0 = nothing pushed yet. Used to avoid pushing
+// the same content twice: when Ctrl+v is pressed while the computer
+// clipboard still matches the last pushed content, only the PASTE key is
+// injected, without sending a new SET_CLIPBOARD/SET_IMAGE_CLIPBOARD message
+// (which would create a duplicate clipboard entry on the device).
+// Only accessed from the main thread.
+static uint32_t clipboard_last_pushed_seq;
+// Windows clipboard sequence number recorded at input manager startup;
+// used to suppress the startup clipboard push when
+// --no-clipboard-push-on-start is set (mode switch / reconnection: the
+// startup SDL clipboard event must not push the content that was already
+// present on the computer clipboard before scrcpy started).
+static uint32_t clipboard_start_suppress_seq;
+// Fingerprint of the last content pushed to the device. Some apps
+// (WeChat) write the clipboard twice for a single copy (two different
+// sequence numbers with identical content), so the seq-based dedup
+// alone is not enough: if the content fingerprint matches the last
+// pushed one, the update is skipped even though the sequence number
+// changed.
+static uint64_t clipboard_last_pushed_fp;
+static bool clipboard_last_pushed_fp_valid;
+// Alternate fingerprint of the last pushed content. On Windows, a copied
+// image file can be read through two different paths with two different
+// byte streams: the original file bytes (CF_HDROP) and the data SDL
+// provides for "image/png" (which SDL re-encodes, not the original file
+// bytes). A clipboard event may switch from one path to the other (e.g.
+// when SDL holds the clipboard open), so both fingerprints are recorded
+// and an update is deduplicated if it matches either of them.
+static uint64_t clipboard_last_pushed_fp_alt;
+static bool clipboard_last_pushed_fp_alt_valid;
+#else
+static bool clipboard_reverse_sync_pending;
+#endif
+
+void
+sc_input_manager_mark_clipboard_reverse_sync(void) {
+    assert(sc_thread_is_main());
+#ifdef _WIN32
+    clipboard_reverse_sync_seq = GetClipboardSequenceNumber();
+    // The computer clipboard now contains exactly the device clipboard
+    // content, so consider it as the last pushed content: a subsequent
+    // Ctrl+v must only inject the PASTE key, without pushing the same
+    // content back to the device (which would duplicate it).
+    clipboard_last_pushed_seq = clipboard_reverse_sync_seq;
+    // The device content is now on the computer clipboard: invalidate the
+    // fingerprint (the reverse-sync seq check above prevents the loop).
+    clipboard_last_pushed_fp_valid = false;
+    clipboard_last_pushed_fp_alt_valid = false;
+#else
+    clipboard_reverse_sync_pending = true;
+#endif
+}
+
+#ifdef _WIN32
+static Uint32 SDLCALL
+clipboard_watch_timer_cb(void *userdata, SDL_TimerID timer_id, Uint32 interval) {
+    (void) userdata;
+    (void) timer_id;
+
+    DWORD seq = GetClipboardSequenceNumber();
+    if (seq != clipboard_poll_sequence) {
+        clipboard_poll_sequence = seq;
+        // Post to the main thread (the timer callback runs on a SDL timer
+        // thread, and SDL_PushEvent is thread-safe)
+        if (!sc_push_event(SC_EVENT_CLIPBOARD_CHANGED)) {
+            LOGW("Could not post clipboard changed event");
+        }
+    }
+
+    return interval;
+}
+#endif
 
 void
 sc_input_manager_init(struct sc_input_manager *im,
@@ -33,6 +148,8 @@ sc_input_manager_init(struct sc_input_manager *im,
     im->mouse_bindings = params->mouse_bindings;
     im->legacy_paste = params->legacy_paste;
     im->clipboard_autosync = params->clipboard_autosync;
+    im->clipboard_sync = params->clipboard_sync;
+    im->suppress_start_push = !params->clipboard_push_on_start;
 
     im->sdl_shortcut_mods = sc_shortcut_mods_to_sdl(params->shortcut_mods);
 
@@ -47,6 +164,21 @@ sc_input_manager_init(struct sc_input_manager *im,
     im->key_repeat = 0;
 
     im->next_sequence = 1; // 0 is reserved for SC_SEQUENCE_INVALID
+
+#ifdef _WIN32
+    // Start polling the Windows clipboard sequence number to detect clipboard
+    // changes from other applications (SDL3 does not report them on Windows)
+    // The timer callback does not reference the input manager, so it stays
+    // valid until SDL_Quit() removes all timers.
+    clipboard_poll_sequence = GetClipboardSequenceNumber();
+    clipboard_last_pushed_seq = 0; // nothing pushed yet
+    clipboard_start_suppress_seq = GetClipboardSequenceNumber();
+    clipboard_last_pushed_fp_valid = false;
+    if (!SDL_AddTimer(SC_CLIPBOARD_WATCH_INTERVAL_MS,
+                      clipboard_watch_timer_cb, NULL)) {
+        LOGW("Could not start clipboard watch timer: %s", SDL_GetError());
+    }
+#endif
 
     im->disconnected = false;
 }
@@ -84,6 +216,21 @@ action_back(struct sc_input_manager *im, enum sc_action action) {
 static inline void
 action_app_switch(struct sc_input_manager *im, enum sc_action action) {
     send_keycode(im, AKEYCODE_APP_SWITCH, action, "APP_SWITCH");
+}
+
+static void
+save_clipboard_image_to_gallery(struct sc_input_manager *im) {
+    // No argument: the server copies the most recent clipboard image
+    // file (already cached for the device clipboard) into the gallery
+    // and triggers a media scan.
+    struct sc_control_msg msg = {
+        .type = SC_CONTROL_MSG_TYPE_SAVE_CLIPBOARD_IMAGE_TO_GALLERY,
+    };
+    if (sc_controller_push_msg(im->controller, &msg)) {
+        LOGI("Save clipboard image to gallery");
+    } else {
+        LOGW("Could not request 'save clipboard image to gallery'");
+    }
 }
 
 static inline void
@@ -177,10 +324,493 @@ get_device_clipboard(struct sc_input_manager *im, enum sc_copy_key copy_key) {
 }
 
 static bool
+clipboard_data_matches(const char *mime_type, const void *data, size_t size) {
+    static const struct {
+        const char *mime;
+        const uint8_t *magic;
+        size_t magic_len;
+    } signatures[] = {
+        { "image/png",  (const uint8_t *) "\x89PNG", 4 },
+        { "image/jpeg", (const uint8_t *) "\xFF\xD8\xFF", 3 },
+        { "image/jpg",  (const uint8_t *) "\xFF\xD8\xFF", 3 },
+        { "image/gif",  (const uint8_t *) "GIF8", 4 },
+        { "image/webp", (const uint8_t *) "RIFF", 4 },
+        { "image/bmp",  (const uint8_t *) "BM", 2 },
+        { NULL, NULL, 0 }
+    };
+
+    if (!data || size < 4) {
+        return false;
+    }
+    const uint8_t *bytes = data;
+    for (size_t i = 0; signatures[i].mime; ++i) {
+        if (strcmp(mime_type, signatures[i].mime) != 0) {
+            continue;
+        }
+        if (size < signatures[i].magic_len
+                || memcmp(bytes, signatures[i].magic, signatures[i].magic_len) != 0) {
+            return false;
+        }
+        if (strcmp(mime_type, "image/webp") == 0) {
+            // RIFF size WEBP
+            return size >= 12 && memcmp(bytes + 8, "WEBP", 4) == 0;
+        }
+        return true;
+    }
+    // Unknown mime type: do not reject it, let the server handle it
+    return true;
+}
+
+
+#ifdef _WIN32
+static bool
+clipboard_get_hdrop_first_file(wchar_t *path, size_t path_size) {
+    // Real-world copies (Explorer, WeChat PC) may use delayed rendering for
+    // CF_HDROP: the format is registered but the data is only produced when
+    // requested, which may fail briefly right after the copy. Other apps may
+    // also hold the clipboard open for a few milliseconds. Without retrying,
+    // the HDROP path would be skipped and we would fall back to the SDL/DIB
+    // path, which often contains a small thumbnail (e.g. 1620x1080) generated
+    // by the source app instead of the original file.
+    if (!IsClipboardFormatAvailable(CF_HDROP)) {
+        // No HDROP at all (e.g. browser copy): do not wait.
+        return false;
+    }
+    for (int attempt = 0; attempt < 12; attempt++) {
+        if (!OpenClipboard(NULL)) {
+            Sleep(50);
+            continue;
+        }
+        bool ok = false;
+        HANDLE hdrop = GetClipboardData(CF_HDROP);
+        if (hdrop) {
+            UINT count = DragQueryFileW((HDROP) hdrop, 0xFFFFFFFF, NULL, 0);
+            if (count > 0) {
+                UINT len = DragQueryFileW((HDROP) hdrop, 0, NULL, 0);
+                if (len > 0 && (size_t) len < path_size) {
+                    DragQueryFileW((HDROP) hdrop, 0, (LPWSTR) path, len + 1);
+                    ok = true;
+                }
+            }
+        }
+        CloseClipboard();
+        if (ok) {
+            return true;
+        }
+        // Delayed rendering: the source app needs time to provide the data.
+        Sleep(100);
+    }
+    return false;
+}
+
+static const char *
+image_mime_from_extension(const wchar_t *path) {
+    const wchar_t *dot = wcsrchr(path, L'.');
+    if (!dot) {
+        return NULL;
+    }
+    if (_wcsicmp(dot, L".gif") == 0) return "image/gif";
+    if (_wcsicmp(dot, L".png") == 0) return "image/png";
+    if (_wcsicmp(dot, L".jpg") == 0 || _wcsicmp(dot, L".jpeg") == 0) return "image/jpeg";
+    if (_wcsicmp(dot, L".webp") == 0) return "image/webp";
+    if (_wcsicmp(dot, L".bmp") == 0) return "image/bmp";
+    if (_wcsicmp(dot, L".heic") == 0 || _wcsicmp(dot, L".heif") == 0) return "image/heic";
+    return NULL;
+}
+
+// Detect the real image format from magic bytes, which has priority over
+// the file extension: some apps (WeChat, QQ, browsers...) copy files with
+// a misleading extension (e.g. a real GIF animation saved as ".jpg").
+// Returns NULL if the magic bytes do not identify a known image format.
+static const char *
+image_mime_from_magic(const uint8_t *data, size_t size) {
+    if (size >= 6 && (memcmp(data, "GIF87a", 6) == 0
+                      || memcmp(data, "GIF89a", 6) == 0)) {
+        return "image/gif";
+    }
+    if (size >= 8 && memcmp(data, "\x89PNG\r\n\x1a\n", 8) == 0) {
+        return "image/png";
+    }
+    if (size >= 3 && data[0] == 0xFF && data[1] == 0xD8 && data[2] == 0xFF) {
+        return "image/jpeg";
+    }
+    if (size >= 12 && memcmp(data, "RIFF", 4) == 0
+            && memcmp(data + 8, "WEBP", 4) == 0) {
+        return "image/webp";
+    }
+    if (size >= 2 && data[0] == 'B' && data[1] == 'M') {
+        return "image/bmp";
+    }
+    return NULL;
+}
+
+// Forward declaration (defined after clipboard_get_hdrop_image).
+static bool clipboard_has_hdrop_image(void);
+
+// FNV-1a 64-bit hash.
+static uint64_t
+clipboard_fnv1a(const uint8_t *data, size_t size) {
+    uint64_t h = 1469598103934665603ULL;
+    for (size_t i = 0; i < size; i++) {
+        h ^= data[i];
+        h *= 1099511628211ULL;
+    }
+    return h;
+}
+
+// Fingerprint of the first HDROP image file: full file content hash (FNV-1a
+// over the file bytes) XOR the file size. This is the SAME fingerprint as the
+// one computed for SDL image/text data, so a clipboard event is deduplicated
+// regardless of the path used to read the content (HDROP or SDL): when SDL
+// holds the clipboard open, the HDROP path falls back to the SDL data path
+// (which returns the same original file bytes), and both fingerprints must
+// match to avoid a duplicate push.
+static bool
+clipboard_hdrop_fingerprint(uint64_t *out_fp) {
+    wchar_t path[MAX_PATH] = {0};
+    if (!clipboard_get_hdrop_first_file(path, sizeof(path))) {
+        return false;
+    }
+    FILE *f = _wfopen(path, L"rb");
+    if (!f) {
+        return false;
+    }
+    uint64_t h = 1469598103934665603ULL;
+    uint8_t buf[8192];
+    size_t rd;
+    uint64_t size = 0;
+    while ((rd = fread(buf, 1, sizeof(buf), f)) > 0) {
+        size += rd;
+        for (size_t i = 0; i < rd; i++) {
+            h ^= buf[i];
+            h *= 1099511628211ULL;
+        }
+    }
+    fclose(f);
+    h ^= size;
+    *out_fp = h;
+    return true;
+}
+
+// Fingerprint of the SDL clipboard data: image MIME data first, then
+// text. Used both for the current content fingerprint and for the
+// alternate fingerprint of a HDROP push (SDL re-encodes the file, so
+// this fingerprint differs from the raw file bytes fingerprint).
+static bool
+clipboard_sdl_data_fingerprint(uint64_t *out_fp) {
+    const char *image_mime_types[] = {
+        "image/png",
+        "image/jpeg",
+        "image/jpg",
+        "image/bmp",
+        "image/webp",
+        "image/gif",
+    };
+    for (size_t i = 0;
+         i < sizeof(image_mime_types) / sizeof(image_mime_types[0]); i++) {
+        size_t size;
+        void *sdldata = SDL_GetClipboardData(image_mime_types[i], &size);
+        if (sdldata && size > 0) {
+            uint64_t fp = clipboard_fnv1a(sdldata, size) ^ size;
+            SDL_free(sdldata);
+            *out_fp = fp;
+            return true;
+        }
+    }
+    char *text = SDL_GetClipboardText();
+    if (text && *text) {
+        size_t len = strlen(text);
+        uint64_t fp = clipboard_fnv1a((const uint8_t *) text, len) ^ len;
+        SDL_free(text);
+        *out_fp = fp;
+        return true;
+    }
+    return false;
+}
+
+// Fingerprint of the current clipboard content: HDROP image file first,
+// then SDL image data, then text. Returns false if the content cannot
+// be fingerprinted.
+static bool
+clipboard_current_fingerprint(uint64_t *out_fp) {
+    if (clipboard_has_hdrop_image()) {
+        return clipboard_hdrop_fingerprint(out_fp);
+    }
+    return clipboard_sdl_data_fingerprint(out_fp);
+}
+
+// Read the first image file from the CF_HDROP clipboard data (copy file in
+// Explorer). The file bytes are sent as-is, keeping the original format
+// (GIF animation, PNG, JPEG...) instead of the rasterized CF_DIB bitmap.
+// Returns false if there is no HDROP data or the first file is not an image
+// (in which case the caller falls back to the SDL image clipboard path; a
+// non-image file must not be pushed, to avoid pushing a file path as text).
+static bool
+clipboard_get_hdrop_image(uint8_t **out_data, size_t *out_size,
+                           const char **out_mime) {
+    wchar_t path[MAX_PATH] = {0};
+    if (!clipboard_get_hdrop_first_file(path, sizeof(path))) {
+        return false;
+    }
+    FILE *f = _wfopen(path, L"rb");
+    if (!f) {
+        LOGW("Could not open HDROP image file");
+        return false;
+    }
+    // Read the file header first: the magic bytes identify the real format
+    // (a ".jpg" file containing GIF data must be pushed as image/gif). The
+    // extension is only a fallback when the magic bytes are not recognized.
+    uint8_t header[16];
+    size_t hdr = fread(header, 1, sizeof(header), f);
+    const char *mime = hdr >= 2 ? image_mime_from_magic(header, hdr) : NULL;
+    if (!mime) {
+        mime = image_mime_from_extension(path);
+    }
+    if (!mime) {
+        LOGD("HDROP item is not an image file, not pushed");
+        fclose(f);
+        return false;
+    }
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (sz <= 0) {
+        fclose(f);
+        return false;
+    }
+    uint8_t *data = malloc((size_t) sz);
+    if (!data) {
+        fclose(f);
+        return false;
+    }
+    size_t rd = fread(data, 1, (size_t) sz, f);
+    fclose(f);
+    if (rd != (size_t) sz) {
+        free(data);
+        return false;
+    }
+    *out_data = data;
+    *out_size = (size_t) sz;
+    *out_mime = mime;
+    return true;
+}
+
+// Lightweight check: is the first CF_HDROP item an image file? Used by the
+// empty-clipboard check so that a copied image file is not dropped before
+// the HDROP push path is reached.
+static bool
+clipboard_has_hdrop_image(void) {
+    wchar_t path[MAX_PATH] = {0};
+    if (!clipboard_get_hdrop_first_file(path, sizeof(path))) {
+        return false;
+    }
+    // Magic bytes first (a GIF saved as ".jpg" must be detected as an
+    // image), then fall back to the extension.
+    FILE *f = _wfopen(path, L"rb");
+    if (f) {
+        uint8_t header[16];
+        size_t hdr = fread(header, 1, sizeof(header), f);
+        fclose(f);
+        if (hdr >= 2 && image_mime_from_magic(header, hdr)) {
+            return true;
+        }
+    }
+    return image_mime_from_extension(path) != NULL;
+}
+#endif
+
+#ifdef _WIN32
+// Copying a file in Explorer puts only CF_HDROP on the clipboard: the SDL
+// image path would see no image. If the first HDROP item is an image file,
+// push its original bytes (preserving the format and GIF animation).
+// Non-image files are not pushed. Returns true if pushed (or handled),
+// false otherwise (caller falls back to SDL data).
+static bool
+clipboard_push_hdrop_image(struct sc_input_manager *im, bool paste,
+                           uint64_t sequence) {
+    const char *hdrop_mime = NULL;
+    uint8_t *hdrop_data = NULL;
+    size_t hdrop_size = 0;
+    if (!clipboard_get_hdrop_image(&hdrop_data, &hdrop_size, &hdrop_mime)) {
+        return false;
+    }
+    // Compute the fingerprints BEFORE pushing: the main one uses the file
+    // bytes already read (no clipboard access), the alternate one (SDL
+    // re-encoded data) is read now to avoid a clipboard-open race right
+    // after the push (SDL may hold the clipboard open while posting its
+    // own clipboard event).
+    uint64_t hdrop_fp = clipboard_fnv1a(hdrop_data, hdrop_size) ^ hdrop_size;
+    uint64_t sdl_alt = 0;
+    bool sdl_alt_ok = clipboard_sdl_data_fingerprint(&sdl_alt);
+    size_t mimetype_len = strlen(hdrop_mime);
+    size_t msg_size = 18 + mimetype_len + hdrop_size;
+    if (msg_size > SC_CONTROL_MSG_MAX_SIZE) {
+        LOGW("HDROP image message too large: %u bytes, dropping", (unsigned) msg_size);
+        free(hdrop_data);
+        return false;
+    }
+    struct sc_control_msg msg;
+    msg.type = SC_CONTROL_MSG_TYPE_SET_IMAGE_CLIPBOARD;
+    msg.set_image_clipboard.sequence = sequence;
+    msg.set_image_clipboard.data = hdrop_data;
+    msg.set_image_clipboard.size = hdrop_size;
+    msg.set_image_clipboard.mimetype = strdup(hdrop_mime);
+    if (!msg.set_image_clipboard.mimetype) {
+        LOG_OOM();
+        free(hdrop_data);
+        return false;
+    }
+    msg.set_image_clipboard.paste = paste;
+    bool success = sc_controller_push_msg(im->controller, &msg);
+    if (success) {
+        // On success, msg.data and msg.mimetype ownership is transferred to
+        // the controller (it is freed by the controller thread after
+        // serialization). Freeing them here would cause a use-after-free.
+        clipboard_last_pushed_seq = GetClipboardSequenceNumber();
+        clipboard_last_pushed_fp = hdrop_fp;
+        clipboard_last_pushed_fp_valid = true;
+        clipboard_last_pushed_fp_alt_valid = sdl_alt_ok;
+        if (sdl_alt_ok) {
+            clipboard_last_pushed_fp_alt = sdl_alt;
+        }
+        LOGI("Image clipboard: pushed HDROP file as %s (%u bytes)",
+             hdrop_mime, (unsigned) hdrop_size);
+        return true;
+    }
+    free(msg.set_image_clipboard.data);
+    free(msg.set_image_clipboard.mimetype);
+    return false;
+}
+#endif
+
+bool
+sc_input_manager_set_device_image_clipboard(struct sc_input_manager *im, bool paste,
+                           uint64_t sequence) {
+    assert(im->controller && im->kp && !im->camera);
+
+    // Multi-step clipboard write (e.g. Explorer with a preview extension
+    // writes a thumbnail bitmap first, then CF_HDROP within the same
+    // sequence number): by now the HDROP file may have appeared, so
+    // retry the HDROP path before pushing the (possibly thumbnail)
+    // SDL bitmap data.
+#ifdef _WIN32
+    if (clipboard_push_hdrop_image(im, paste, sequence)) {
+        return true;
+    }
+#endif
+
+    // Try common image MIME types to check if image clipboard data exists
+    const char* image_mime_types[] = {
+        "image/png",
+        "image/jpeg",
+        "image/jpg",
+        "image/gif",
+        "image/webp",
+        "image/bmp",
+        NULL
+    };
+
+    for (int i = 0; image_mime_types[i]; i++) {
+        const char* mime_type = image_mime_types[i];
+        size_t size;
+        void *img_data = SDL_GetClipboardData(mime_type, &size);
+        if (img_data && size > 0) {
+            // Verify that the data matches the claimed MIME type: some
+            // applications register exotic clipboard formats under a misleading
+            // name. If the data does not match, the server would not be able to
+            // decode it and would fall back to an unreadable clipboard item.
+            if (!clipboard_data_matches(mime_type, img_data, size)) {
+                LOGW("Clipboard data does not match mime type \"%s\", skipping",
+                     mime_type);
+                SDL_free(img_data);
+                continue;
+            }
+            uint8_t *data = img_data;
+            uint8_t *compressed = NULL;
+            // Fingerprints computed before pushing (see HDROP branch):
+            // main = SDL data hash, alternate = HDROP file hash.
+            uint64_t sdl_fp = clipboard_fnv1a(data, size) ^ size;
+            uint64_t hdrop_alt = 0;
+            bool hdrop_alt_ok = clipboard_hdrop_fingerprint(&hdrop_alt);
+
+            // Compress large BMP images to JPEG to keep the control message small
+            if (strcmp(mime_type, "image/bmp") == 0
+                    && size > SC_IMAGE_CLIPBOARD_COMPRESS_THRESHOLD
+                    && sc_image_bmp_to_jpeg(img_data, size, &compressed, &size)) {
+                LOGI("Image clipboard: compressed BMP to JPEG (%u bytes)", (unsigned) size);
+                mime_type = "image/jpeg";
+                data = compressed;
+            }
+
+            size_t mimetype_len = strlen(mime_type);
+
+            // Check if message exceeds max size
+            size_t msg_size = 18 + mimetype_len + size;
+            if (msg_size > SC_CONTROL_MSG_MAX_SIZE) {
+                LOGW("Image clipboard message too large: %u bytes, dropping",
+                     (unsigned) msg_size);
+                free(compressed);
+                SDL_free(img_data);
+                // Report the drop as a failure so the caller may fall back
+                // to the text clipboard (same behavior as the HDROP path)
+                return false;
+            }
+
+            struct sc_control_msg msg;
+            msg.type = SC_CONTROL_MSG_TYPE_SET_IMAGE_CLIPBOARD;
+            msg.set_image_clipboard.sequence = sequence;
+            msg.set_image_clipboard.data = malloc(size);
+            if (msg.set_image_clipboard.data) {
+                memcpy(msg.set_image_clipboard.data, data, size);
+                msg.set_image_clipboard.size = size;
+                msg.set_image_clipboard.mimetype = strdup(mime_type);
+                if (!msg.set_image_clipboard.mimetype) {
+                    LOG_OOM();
+                    free(msg.set_image_clipboard.data);
+                    free(compressed);
+                    SDL_free(img_data);
+                    return false;
+                }
+                msg.set_image_clipboard.paste = paste;
+
+                bool success = sc_controller_push_msg(im->controller, &msg);
+                if (success) {
+#ifdef _WIN32
+                    clipboard_last_pushed_seq = GetClipboardSequenceNumber();
+                    clipboard_last_pushed_fp = sdl_fp;
+                    clipboard_last_pushed_fp_valid = true;
+                    clipboard_last_pushed_fp_alt_valid = hdrop_alt_ok;
+                    if (hdrop_alt_ok) {
+                        clipboard_last_pushed_fp_alt = hdrop_alt;
+                    }
+#endif
+                    free(compressed);
+                    SDL_free(img_data);
+                    return true;
+                }
+                free(msg.set_image_clipboard.data);
+                free(msg.set_image_clipboard.mimetype);
+            }
+            free(compressed);
+            SDL_free(img_data);
+        }
+    }
+
+    // Return false since we can't actually call the SDL3 functions in this context
+    return false;
+}
+
+static bool
 set_device_clipboard(struct sc_input_manager *im, bool paste,
                      uint64_t sequence) {
     assert(im->controller && im->kp && !im->camera);
 
+    if (sc_input_manager_set_device_image_clipboard(im, paste, sequence)) {
+        // Successfully sent image clipboard, return true
+        return true;
+    }
+
+    // Fallback to text clipboard
     char *text = SDL_GetClipboardText();
     if (!text) {
         LOGW("Could not get clipboard text: %s", SDL_GetError());
@@ -200,13 +830,180 @@ set_device_clipboard(struct sc_input_manager *im, bool paste,
     msg.set_clipboard.text = text_dup;
     msg.set_clipboard.paste = paste;
 
+    uint64_t text_fp = 0;
+#ifdef _WIN32
+    size_t text_len = strlen(text_dup);
+    text_fp = clipboard_fnv1a((const uint8_t *) text_dup, text_len) ^ text_len;
+#endif
+
     if (!sc_controller_push_msg(im->controller, &msg)) {
         free(text_dup);
         LOGW("Could not request 'set device clipboard'");
         return false;
     }
 
+#ifdef _WIN32
+    clipboard_last_pushed_seq = GetClipboardSequenceNumber();
+    clipboard_last_pushed_fp = text_fp;
+    clipboard_last_pushed_fp_valid = true;
+    clipboard_last_pushed_fp_alt_valid = false;
+#endif
+
     return true;
+}
+
+static bool
+clipboard_has_image(void) {
+    // Same MIME types as in sc_input_manager_set_device_image_clipboard()
+    static const char *const image_mime_types[] = {
+        "image/png",
+        "image/jpeg",
+        "image/jpg",
+        "image/gif",
+        "image/webp",
+        "image/bmp",
+        NULL
+    };
+
+    for (size_t i = 0; image_mime_types[i]; ++i) {
+        if (SDL_HasClipboardData(image_mime_types[i])) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void
+sc_input_manager_process_clipboard_update(struct sc_input_manager *im) {
+    if (im->camera || !im->controller || !im->kp || im->disconnected) {
+        return;
+    }
+    if (!im->clipboard_sync) {
+        // Disabled by --no-clipboard-sync
+        return;
+    }
+
+#ifdef _WIN32
+    if (im->suppress_start_push) {
+        // First clipboard event after startup with
+        // --no-clipboard-push-on-start (reconnection / mode switch):
+        // if the sequence number still matches the one recorded at
+        // startup, this is the startup push event (content already
+        // present before scrcpy started) and it must be suppressed.
+        // If the sequence number changed, the user copied something
+        // new right after startup: push it normally.
+        im->suppress_start_push = false;
+        if (GetClipboardSequenceNumber() == clipboard_start_suppress_seq) {
+            LOGI("Startup clipboard push suppressed (--no-clipboard-push-on-start)");
+            return;
+        }
+    }
+    // Deduplicate: on Windows, the same clipboard change may be reported
+    // twice (SDL_EVENT_CLIPBOARD_UPDATE event and the polling timer both
+    // post a clipboard update). Both trigger
+    // sc_input_manager_process_clipboard_update(), and without this check
+    // the same content would be pushed twice, creating two identical
+    // clipboard entries on the device.
+    uint32_t seq = GetClipboardSequenceNumber();
+    if (clipboard_last_pushed_seq && seq == clipboard_last_pushed_seq) {
+        // Same sequence number as the last pushed update: normally this
+        // is the double trigger (SDL event + polling timer) of a single
+        // clipboard change. However, some applications (Explorer with
+        // preview extensions) write their clipboard formats in several
+        // steps within one sequence number (e.g. a thumbnail bitmap
+        // first, then CF_HDROP): the later step has the same sequence
+        // number but different content. In that case push again so the
+        // HDROP original overrides the previously pushed thumbnail.
+        bool same_content = false;
+        if (clipboard_last_pushed_fp_valid) {
+            uint64_t fp;
+            if (!clipboard_current_fingerprint(&fp)
+                    || fp == clipboard_last_pushed_fp
+                    || (clipboard_last_pushed_fp_alt_valid
+                        && fp == clipboard_last_pushed_fp_alt)) {
+                same_content = true;
+            }
+        }
+        if (same_content) {
+            LOGD("Clipboard update ignored (already pushed, seq=%u)", seq);
+            return;
+        }
+        LOGD("Clipboard sequence unchanged but content changed "
+             "(multi-step clipboard write), pushing again");
+    }
+    if (clipboard_reverse_sync_seq
+            && GetClipboardSequenceNumber() == clipboard_reverse_sync_seq) {
+        // The computer clipboard still contains the content set by a reverse
+        // synchronization (device -> computer): ignore the update, otherwise
+        // the content would be pushed back to the device, triggering an
+        // infinite loop.
+        LOGD("Clipboard update ignored (reverse synchronization)");
+        return;
+    }
+    // The clipboard changed since the reverse synchronization: release the
+    // suppression, the new content is a genuine user copy.
+    clipboard_reverse_sync_seq = 0;
+#else
+    if (clipboard_reverse_sync_pending) {
+        // The computer clipboard change comes from a reverse synchronization
+        // (device -> computer): ignore it, otherwise the content would be
+        // pushed back to the device, triggering an infinite loop.
+        clipboard_reverse_sync_pending = false;
+        LOGD("Clipboard update ignored (reverse synchronization)");
+        return;
+    }
+#endif
+
+    // Do not push an empty clipboard: it would clear the device clipboard
+    // (e.g. when copying a file on the computer, the clipboard contains
+    // neither text nor image).
+    char *text = SDL_GetClipboardText();
+    bool empty = !text || !*text;
+    SDL_free(text);
+    if (empty && !clipboard_has_image()
+#ifdef _WIN32
+            && !clipboard_has_hdrop_image()
+#endif
+            ) {
+        LOGD("Computer clipboard is empty, nothing to synchronize");
+        return;
+    }
+
+#ifdef _WIN32
+    // Content fingerprint dedup: WeChat writes the clipboard twice with
+    // identical content but different sequence numbers (the 2-1 cycle:
+    // one copy = two updates). The seq-based dedup above cannot catch
+    // that, so skip the update if the content is identical to the last
+    // pushed one.
+    if (clipboard_last_pushed_fp_valid) {
+        uint64_t fp;
+        if (!clipboard_current_fingerprint(&fp)
+                || fp == clipboard_last_pushed_fp
+                || (clipboard_last_pushed_fp_alt_valid
+                    && fp == clipboard_last_pushed_fp_alt)) {
+            // Fingerprint unavailable (clipboard open race) is treated
+            // conservatively as "same content": the polling timer will
+            // re-check on the next round and push if the content
+            // actually changed (multi-step write).
+            LOGD("Clipboard update ignored (same content as last push)");
+            // WeChat writes the clipboard twice with the same content:
+            // the sequence number already advanced. Synchronize it so a
+            // later Ctrl+v does not wrongly conclude "not pushed yet"
+            // and push the same content a second time.
+            clipboard_last_pushed_seq = GetClipboardSequenceNumber();
+            return;
+        }
+    }
+#endif
+
+    // Synchronize the computer clipboard (text or image) to the device
+    // clipboard without pasting (nopaste), so the user can paste it manually
+    // with Ctrl+v (or a long press) in any app.
+    if (!set_device_clipboard(im, false, SC_SEQUENCE_INVALID)) {
+        LOGW("Could not synchronize computer clipboard to device");
+    } else {
+        LOGI("Computer clipboard synchronized to device");
+    }
 }
 
 static void
@@ -436,6 +1233,9 @@ sc_input_manager_process_key(struct sc_input_manager *im,
     uint16_t mods = im->sdl_shortcut_mods;
     bool is_shortcut = sc_shortcut_mods_is_shortcut_mod(mods, mod)
                     || sc_shortcut_mods_is_shortcut_key(mods, sdl_keycode);
+    LOGD("KEYDBG: down=%d repeat=%d keycode=%d scancode=%d mod=0x%x mods=0x%x is_shortcut=%d ctrl=%d shift=%d",
+         down, repeat, (int) sdl_keycode, (int) event->scancode, (unsigned) mod,
+         (unsigned) mods, is_shortcut, ctrl, shift);
 
     if (down && !repeat && !disconnected) {
         if (sdl_keycode == im->last_keycode && mod == im->last_mod) {
@@ -445,6 +1245,32 @@ sc_input_manager_process_key(struct sc_input_manager *im,
             im->last_keycode = sdl_keycode;
             im->last_mod = mod;
         }
+    }
+
+    // Ctrl+G: save the current clipboard image to the device gallery.
+    // Ctrl is not a MOD key (unlike Alt/Super), so without this check the
+    // combination would be forwarded to the device as a regular key event.
+    // Unlike MOD+Shift+G, Ctrl+letter combinations are never intercepted
+    // by the Chinese input method (e.g. Ctrl+V works without switching
+    // the keyboard layout), so this shortcut works with a Chinese IME
+    // active.
+    if (down && !repeat && ctrl && !shift
+            && !(event->mod & SDL_KMOD_ALT) && !(event->mod & SDL_KMOD_GUI)
+            && sdl_keycode == SDLK_G) {
+        if (im->kp && !paused) {
+            save_clipboard_image_to_gallery(im);
+        }
+        return;
+    }
+
+    // Ctrl+F: toggle the fps overlay visibility. Same interception pattern
+    // as Ctrl+G: consumed by the client, never forwarded to the device, and
+    // not blocked by a Chinese IME. F matches "fps" for easy recall.
+    if (down && !repeat && ctrl && !shift
+            && !(event->mod & SDL_KMOD_ALT) && !(event->mod & SDL_KMOD_GUI)
+            && sdl_keycode == SDLK_F) {
+        sc_screen_toggle_fps_overlay(im->screen);
+        return;
     }
 
     // Shortcuts that do not involve the MOD key
@@ -516,10 +1342,15 @@ sc_input_manager_process_key(struct sc_input_manager *im,
                 }
                 return;
             case SDLK_G:
+                LOGD("KEYDBG: first-switch SDLK_G shift=%d video=%d", shift, video);
+                // MOD+G (no shift): resize to pixel-perfect. With shift held
+                // (MOD+Shift+G), fall through to the save-to-gallery shortcut
+                // handled in the device-control switch below.
                 if (video && !shift && !repeat && down) {
                     sc_screen_resize_to_pixel_perfect(im->screen);
+                    return;
                 }
-                return;
+                break;
             case SDLK_I:
                 if (video && !shift && !repeat && down) {
                     switch_fps_counter_state(im);
@@ -566,8 +1397,22 @@ sc_input_manager_process_key(struct sc_input_manager *im,
                     }
                     return;
                 case SDLK_S:
-                    if (im->kp && !shift && !repeat && !paused) {
+                    if (im->kp && !shift && !repeat && down && !paused) {
                         action_app_switch(im, action);
+                    }
+                    return;
+                case SDLK_G:
+                    LOGD("KEYDBG: second-switch SDLK_G shift=%d kp=%d paused=%d", shift, !!im->kp, paused);
+                    // MOD+Shift+G: save the current clipboard image (the
+                    // original file already cached in the device clipboard)
+                    // to the device gallery. Not MOD+Shift+S: on Windows the
+                    // default MOD is Alt or Super, and Alt+Shift (input
+                    // language switch) / Super+Shift+S (Windows screenshot)
+                    // collide with system shortcuts, while Ctrl+Shift+S is
+                    // not a MOD combination at all (Ctrl is forwarded to the
+                    // device).
+                    if (im->kp && shift && !repeat && down && !paused) {
+                        save_clipboard_image_to_gallery(im);
                     }
                     return;
                 case SDLK_M:
@@ -599,8 +1444,14 @@ sc_input_manager_process_key(struct sc_input_manager *im,
                     }
                     return;
                 case SDLK_C:
-                    if (im->kp && !shift && !repeat && down && !paused) {
-                        get_device_clipboard(im, SC_COPY_KEY_COPY);
+                    if (im->kp && !repeat && down && !paused) {
+                        if (shift) {
+                            // MOD+Shift+C: copy the computer clipboard (image
+                            // or text) to the device clipboard without pasting
+                            set_device_clipboard(im, false, SC_SEQUENCE_INVALID);
+                        } else {
+                            get_device_clipboard(im, SC_COPY_KEY_COPY);
+                        }
                     }
                     return;
                 case SDLK_X:
@@ -686,23 +1537,63 @@ sc_input_manager_process_key(struct sc_input_manager *im,
             return;
         }
 
-        // Request an acknowledgement only if necessary
-        uint64_t sequence = im->kp->async_paste ? im->next_sequence
-                                                : SC_SEQUENCE_INVALID;
-
-        // Synchronize the computer clipboard to the device clipboard before
-        // sending Ctrl+v, to allow seamless copy-paste.
-        bool ok = set_device_clipboard(im, false, sequence);
-        if (!ok) {
-            LOGW("Clipboard could not be synchronized, Ctrl+v not injected");
-            return;
+        // If the automatic clipboard sync is enabled and the computer
+        // clipboard still contains the content that was already pushed to
+        // the device, do not push it again: the device clipboard already
+        // has the latest content, only the PASTE key must be injected.
+        // Pushing again would create a duplicate clipboard entry on the
+        // device (e.g. two files in the clipboard history for one copy).
+        bool push = true;
+#ifdef _WIN32
+        if (im->clipboard_sync) {
+            uint32_t seq = GetClipboardSequenceNumber();
+#ifdef _WIN32
+            // Fingerprint check first: WeChat writes the clipboard twice
+            // (two different sequence numbers with identical content), so
+            // the automatic sync dedup advances the sequence number without
+            // pushing. Comparing only the sequence number would wrongly
+            // conclude "not pushed yet" and push the same content again.
+            if (clipboard_last_pushed_fp_valid) {
+                uint64_t fp;
+                if (clipboard_current_fingerprint(&fp)
+                        && fp == clipboard_last_pushed_fp) {
+                    LOGD("Clipboard already pushed to device (fingerprint match), only injecting PASTE");
+                    push = false;
+                }
+            }
+#endif
+            if (push && clipboard_last_pushed_seq
+                    && seq == clipboard_last_pushed_seq) {
+                LOGD("Clipboard already pushed to device, only injecting PASTE");
+                push = false;
+            }
         }
+#endif
 
-        if (im->kp->async_paste) {
-            // The key processor must wait for this ack before injecting Ctrl+v
-            ack_to_wait = sequence;
-            // Increment only when the request succeeded
-            ++im->next_sequence;
+        uint64_t sequence = SC_SEQUENCE_INVALID;
+        if (push) {
+            // Request an acknowledgement only if necessary
+            sequence = im->kp->async_paste ? im->next_sequence
+                                           : SC_SEQUENCE_INVALID;
+
+            // Synchronize the computer clipboard to the device clipboard
+            // before sending Ctrl+v, to allow seamless copy-paste. This
+            // covers the case where the automatic sync is disabled
+            // (--no-clipboard-sync) or the clipboard changed but the
+            // automatic sync did not trigger yet.
+            bool ok = set_device_clipboard(im, false, sequence);
+            if (!ok) {
+                LOGW("Clipboard could not be synchronized, Ctrl+v not injected");
+                return;
+            }
+
+            if (im->kp->async_paste) {
+                // The key processor must wait for this ack before injecting
+                // Ctrl+v
+                ack_to_wait = sequence;
+                // Increment only when the request succeeded
+                ++im->next_sequence;
+            }
         }
     }
 
@@ -1204,6 +2095,12 @@ sc_input_manager_handle_event(struct sc_input_manager *im,
             break;
         case SDL_EVENT_DROP_FILE:
             sc_input_manager_process_file(im, &event->drop);
+            break;
+        case SDL_EVENT_CLIPBOARD_UPDATE:
+            sc_input_manager_process_clipboard_update(im);
+            break;
+        case SC_EVENT_CLIPBOARD_CHANGED:
+            sc_input_manager_process_clipboard_update(im);
             break;
         case SC_EVENT_DEVICE_DISCONNECTED:
             sc_input_manager_on_device_disconnected(im);
