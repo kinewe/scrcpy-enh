@@ -11,7 +11,11 @@ import java.nio.charset.StandardCharsets;
 
 public class ControlMessageReader {
 
-    private static final int MESSAGE_MAX_SIZE = 1 << 18; // 256k
+    // Control messages have no fixed size cap here: the image clipboard
+    // message size is read from the message length field (the client limits
+    // it to SC_CONTROL_MSG_MAX_SIZE = 256M, see app/src/control_msg.h).
+    // This constant only caps CLIPBOARD_TEXT_MAX_LENGTH below.
+    private static final int MESSAGE_MAX_SIZE = 1 << 18; // 256K
 
     public static final int CLIPBOARD_TEXT_MAX_LENGTH = MESSAGE_MAX_SIZE - 14; // type: 1 byte; sequence: 8 bytes; paste flag: 1 byte; length: 4 bytes
     public static final int INJECT_TEXT_MAX_LENGTH = 300;
@@ -49,6 +53,7 @@ public class ControlMessageReader {
             case ControlMessage.TYPE_RESET_VIDEO:
             case ControlMessage.TYPE_CAMERA_ZOOM_IN:
             case ControlMessage.TYPE_CAMERA_ZOOM_OUT:
+            case ControlMessage.TYPE_SAVE_CLIPBOARD_IMAGE_TO_GALLERY:
                 return ControlMessage.createEmpty(type);
             case ControlMessage.TYPE_UHID_CREATE:
                 return parseUhidCreate();
@@ -64,6 +69,8 @@ public class ControlMessageReader {
                 return parseResizeDisplay();
             case ControlMessage.TYPE_SCAN_FILE:
                 return parseScanFile();
+            case ControlMessage.TYPE_SET_IMAGE_CLIPBOARD:
+                return parseSetImageClipboard();
             default:
                 throw new ControlProtocolException("Unknown event type: " + type);
         }
@@ -188,6 +195,14 @@ public class ControlMessageReader {
     private ControlMessage parseScanFile() throws IOException {
         String path = parseString();
         return ControlMessage.createScanFile(path);
+    }
+
+    private ControlMessage parseSetImageClipboard() throws IOException {
+        long sequence = dis.readLong();
+        boolean paste = dis.readByte() != 0;
+        String mimeType = parseString();
+        byte[] data = parseByteArray(4); // Read image data
+        return ControlMessage.createSetImageClipboard(sequence, paste, mimeType, data);
     }
 
     private Position parsePosition() throws IOException {
