@@ -2,7 +2,9 @@
 
 基于 [scrcpy 4.1](https://github.com/Genymobile/scrcpy) 的增强构建，面向「电脑 ↔ Android 移动设备」投屏协同场景，在官方版本之上提供自适应码率、状态显示、图片剪贴板等实用增强功能。
 
-> **v1.3.1 已正式发布**（master 分支）——[Release 下载](https://github.com/kinewe/PC-kinewe-yinmo/releases/tag/v1.3.1)（zip 约 64MB，含全部运行库，解压即用）
+> **v1.4 已正式发布**（master 分支）——[Release 下载](https://github.com/kinewe/PC-kinewe-yinmo/releases/tag/v1.4)（zip 含全部运行库，解压即用）
+>
+> 历史版本：[v1.3.1](https://github.com/kinewe/PC-kinewe-yinmo/releases/tag/v1.3.1) 及更早见 Release 列表
 
 ---
 
@@ -16,7 +18,7 @@
 | 🖼️ **Ctrl+G 存相册** | v1.2 | 投屏中按 Ctrl+G 把剪贴板原图保存到手机相册 |
 | 📐 **动态规格分配** | v1.2.1 | 插线时读取设备分辨率/刷新率，动态分配串流规格 |
 | ⚡ **ABR 双维自适应** | v1.3 | 码率 + 帧率双维自适应降级/恢复，压力下保持跟手 |
-| 📊 **投屏状态控件** | **v1.3.1** | 右上角实时显示 帧率/码率/连接模式，Alt+拖动可移动 |
+| 📊 **投屏状态控件** | v1.3.1 | 右上角实时显示 帧率/码率/连接模式，Alt+拖动可移动，Ctrl+F 开关 |
 
 ---
 
@@ -142,7 +144,8 @@ A：无线规格 15M/1920/60fps，受 WiFi 抖动影响（28-30ms 常态抖动�
 
 | 版本 | 内容 |
 |---|---|
-| **v1.3.1** | 投屏状态控件（实际/档位 fps + 实时码率 + USB/WIFI，Alt+拖动可移动） |
+| **v1.4** | GL 满档减帧修复（120 档真满血）、fps 档位全链路生效、overlay S 字形 + Ctrl+F 开关、全量代码审查加固 |
+| v1.3.1 | 投屏状态控件（实际/档位 fps + 实时码率 + USB/WIFI，Alt+拖动可移动） |
 | v1.3 | ABR 双维自适应（码率+帧率）、90fps 缓冲搭档档、恢复链提速/防抖、降档退避 |
 | v1.2.1 | 动态规格分配（插线读分辨率/刷新率） |
 | v1.2 | uhid 键盘伪装中文输入、图片剪贴板同步（PR #6676）、Ctrl+G 存相册 |
