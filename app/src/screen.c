@@ -1483,6 +1483,25 @@ sc_screen_restore_global_keyboard_layout_apply(struct sc_screen *screen) {
         return true;
     }
     HIMC imc = ImmGetContext(fg);
+    if (!imc) {
+        // Some edit controls (TSF-only UIs, Word's document window) do not
+        // expose an IMM32 context. Fall back to the top-level foreground
+        // window, then to the default IME window, so the IME open state is
+        // still restored for the window the user is typing into.
+        HWND top = GetForegroundWindow();
+        if (top && top != fg) {
+            imc = ImmGetContext(top);
+        }
+        if (!imc) {
+            HWND def = ImmGetDefaultIMEWnd(fg);
+            if (def && def != fg) {
+                imc = ImmGetContext(def);
+            }
+        }
+        if (imc) {
+            LOGI("IME context obtained via fallback window");
+        }
+    }
     if (imc) {
         // Restore the IME open state captured when scrcpy gained focus,
         // never force TRUE (the user may have been in English mode before).
@@ -1491,6 +1510,9 @@ sc_screen_restore_global_keyboard_layout_apply(struct sc_screen *screen) {
         }
         ImmReleaseContext(fg, imc);
         LOGI("Foreground window IME restored (saved open state)");
+    } else {
+        LOGW("No IME context for foreground window, IME open state not "
+             "restored (layout restore still done)");
     }
     return true;
 }
