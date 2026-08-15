@@ -1241,6 +1241,58 @@ sc_disconnect_on_timeout(struct sc_disconnect *d, void *userdata) {
 }
 
 #ifdef _WIN32
+// MinGW's imm.h omits the WM_IME_CONTROL subcommands; values are the
+// documented IMC_* codes used by the default IME window.
+#define IMC_GETCONVERSIONMODE 0x0001
+#define IMC_SETCONVERSIONMODE 0x0002
+
+// TSF-only edit controls (Word document, UWP) have no HIMC. Classic
+// Win32 threads usually still expose a hidden default IME window owned
+// by ctfmon; WM_IME_CONTROL to that window is the documented
+// cross-process way to query/set the conversion mode without hooks.
+static HWND
+sc_screen_find_default_ime_wnd(HWND hwnd) {
+    while (hwnd) {
+        HWND ime = ImmGetDefaultIMEWnd(hwnd);
+        if (ime) {
+            return ime;
+        }
+        hwnd = GetAncestor(hwnd, GA_PARENT);
+    }
+    return NULL;
+}
+
+static bool
+sc_screen_ime_is_native(HWND target) {
+    HWND ime = sc_screen_find_default_ime_wnd(target);
+    if (!ime) {
+        return false;
+    }
+    DWORD_PTR result = 0;
+    LRESULT ok = SendMessageTimeoutW(ime, WM_IME_CONTROL,
+                                     IMC_GETCONVERSIONMODE, 0,
+                                     SMTO_ABORTIFHUNG, 500, &result);
+    return ok && (result & IME_CMODE_NATIVE) != 0;
+}
+
+static bool
+sc_screen_ime_set_native(HWND target) {
+    HWND ime = sc_screen_find_default_ime_wnd(target);
+    if (!ime) {
+        return false;
+    }
+    DWORD_PTR result = 0;
+    LRESULT ok = SendMessageTimeoutW(ime, WM_IME_CONTROL,
+                                     IMC_SETCONVERSIONMODE,
+                                     IME_CMODE_NATIVE,
+                                     SMTO_ABORTIFHUNG, 500, &result);
+    if (!ok) {
+        LOGW("Set IME conversion mode failed: %lu",
+             (unsigned long) GetLastError());
+    }
+    return ok != 0;
+}
+
 // GetForegroundWindow() is wrong for UWP: the top-level
 // ApplicationFrameWindow lives in ApplicationFrameHost.exe, whose frame
 // thread keeps a stale HKL and does not receive layout changes.
@@ -1483,36 +1535,43 @@ sc_screen_restore_global_keyboard_layout_apply(struct sc_screen *screen) {
         return true;
     }
     HIMC imc = ImmGetContext(fg);
+    HWND imc_owner = fg;
     if (!imc) {
-        // Some edit controls (TSF-only UIs, Word's document window) do not
-        // expose an IMM32 context. Fall back to the top-level foreground
-        // window, then to the default IME window, so the IME open state is
-        // still restored for the window the user is typing into.
         HWND top = GetForegroundWindow();
         if (top && top != fg) {
             imc = ImmGetContext(top);
-        }
-        if (!imc) {
-            HWND def = ImmGetDefaultIMEWnd(fg);
-            if (def && def != fg) {
-                imc = ImmGetContext(def);
-            }
-        }
-        if (imc) {
-            LOGI("IME context obtained via fallback window");
+            imc_owner = top;
         }
     }
+    if (!imc) {
+        HWND def = ImmGetDefaultIMEWnd(fg);
+        if (def && def != fg) {
+            imc = ImmGetContext(def);
+            imc_owner = def;
+        }
+    }
+
     if (imc) {
-        // Restore the IME open state captured when scrcpy gained focus,
-        // never force TRUE (the user may have been in English mode before).
+        // Legacy IMM32 window: restore open status exactly as before.
         if (screen->ime_open_saved_valid) {
             ImmSetOpenStatus(imc, screen->ime_open_saved);
         }
-        ImmReleaseContext(fg, imc);
+        ImmReleaseContext(imc_owner, imc);
         LOGI("Foreground window IME restored (saved open state)");
+    } else if (!screen->ime_open_saved_valid || screen->ime_open_saved) {
+        // TSF-only control (Word document, UWP): no HIMC. For classic
+        // Win32 windows the hidden default IME window still works; force
+        // native conversion mode as best effort (same policy as the
+        // existing "unknown -> reopen" fallback). UWP has no such window
+        // and WM_IME_CONTROL is ignored there.
+        if (sc_screen_ime_set_native(fg)) {
+            LOGI("Foreground IME conversion mode restored to native");
+        } else {
+            LOGW("No IMM32/IME window for foreground control, IME mode "
+                 "not restored (TSF-only/UWP)");
+        }
     } else {
-        LOGW("No IME context for foreground window, IME open state not "
-             "restored (layout restore still done)");
+        LOGI("IME mode restore skipped (saved state was closed)");
     }
     return true;
 }
@@ -1583,7 +1642,15 @@ sc_screen_keyboard_layout_retry(struct sc_screen *screen) {
     HKL current = GetKeyboardLayout(input_tid);
     HKL original = (HKL) screen->original_hkl;
     if (current && original && current == original) {
-        // Already restored; the attempt that won already handled IME.
+        // Layout already restored. The remaining failure mode is the TSF
+        // conversion mode (Chinese layout but English mode): retry it via
+        // the classic default-IME-window path. UWP has no such window, so
+        // this is a no-op there.
+        if (screen->ime_restore_allowed
+                && (!screen->ime_open_saved_valid || screen->ime_open_saved)
+                && !sc_screen_ime_is_native(input_hwnd)) {
+            sc_screen_ime_set_native(input_hwnd);
+        }
         return;
     }
     if (current && original && current != original) {
@@ -1654,7 +1721,11 @@ sc_screen_apply_keyboard_layout(struct sc_screen *screen, bool english) {
                 screen->ime_open_saved = ImmGetOpenStatus(imc) != FALSE;
                 screen->ime_open_saved_valid = true;
             }
-            ImmSetOpenStatus(imc, FALSE);
+            // NOTE: ImmSetOpenStatus(imc, FALSE) deliberately removed:
+            // the 00000409 layout switch already deactivates TSF text
+            // services, and this call writes open/close (not the 中/英
+            // conversion mode), so it was redundant. The saved read above
+            // is kept for the legacy IMM32 fallback.
             ImmReleaseContext(hwnd, imc);
         }
         LOGI("IME layout forced to English (00000409), original 0x%08lx%s, "
