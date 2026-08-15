@@ -1254,8 +1254,12 @@ sc_screen_per_app_ime_enabled(void) {
                                   L"EnablePerAppLanguageProfile",
                                   RRF_RT_REG_DWORD, NULL, &enabled, &size);
     if (status == ERROR_SUCCESS) {
+        LOGI("Per-app IME registry: EnablePerAppLanguageProfile=%lu",
+             enabled);
         return enabled != 0;
     }
+    LOGI("Per-app IME registry unavailable (status=0x%lx), runtime probe",
+         (unsigned long) status);
     // Value missing (common on Windows 11 where the UI default is "on" but
     // the value is only written once the user touches the setting): fall
     // back to a runtime observation. With per-app IME off (shared layout),
@@ -1282,6 +1286,9 @@ sc_screen_per_app_ime_enabled(void) {
              lang);
         return true;
     }
+    LOGI("Per-app IME runtime probe: foreground thread layout English "
+         "(0x%04lx), treat as shared layout",
+         lang);
     return false;
 }
 
@@ -1307,9 +1314,22 @@ sc_screen_per_app_ime_enabled(void) {
 // Return true when a delayed retry could still help (the per-app setting
 // is disabled and there is a foreground thread to target).
 static bool
+sc_screen_restore_global_keyboard_layout_apply(struct sc_screen *screen);
+
+static bool
 sc_screen_restore_global_keyboard_layout_once(struct sc_screen *screen) {
     HKL original = (HKL) screen->original_hkl;
     if (!original) {
+        return false;
+    }
+
+    unsigned long orig_lang = (unsigned long) (uintptr_t) original & 0xFFFF;
+    if (orig_lang == 0x0409) {
+        // original is the very layout we force (00000409): with the shared
+        // layout there is nothing that leaked, and with per-app enabled we
+        // must not broadcast English onto windows that kept another layout.
+        LOGI("Original layout already English (0x%04lx), skip global restore",
+             orig_lang);
         return false;
     }
 
@@ -1321,10 +1341,29 @@ sc_screen_restore_global_keyboard_layout_once(struct sc_screen *screen) {
         return false;
     }
 
-    LOGI("Keyboard layout globally restored to 0x%08lx (broadcast "
-         "WM_INPUTLANGCHANGEREQUEST)", (unsigned long) (uintptr_t) original);
-    PostMessage(HWND_BROADCAST, WM_INPUTLANGCHANGEREQUEST,
-                INPUTLANGCHANGE_FORWARD, (LPARAM) original);
+    return sc_screen_restore_global_keyboard_layout_apply(screen);
+}
+
+// Execution part of the restore: the per-app decision has already been made
+// (disabled). The retry timer calls this directly so the runtime probe is
+// not re-sampled on every retry (a successful first restore leaves the
+// foreground thread on the original layout, which the probe would then
+// misread as per-app enabled).
+static bool
+sc_screen_restore_global_keyboard_layout_apply(struct sc_screen *screen) {
+    HKL original = (HKL) screen->original_hkl;
+    if (!original) {
+        return false;
+    }
+
+    if (!PostMessage(HWND_BROADCAST, WM_INPUTLANGCHANGEREQUEST,
+                     INPUTLANGCHANGE_FORWARD, (LPARAM) original)) {
+        LOGW("Keyboard layout restore broadcast failed: %lu",
+             (unsigned long) GetLastError());
+    } else {
+        LOGI("Keyboard layout restore broadcast posted (0x%08lx)",
+             (unsigned long) (uintptr_t) original);
+    }
 
     // The broadcast is asynchronous and some TSF-integrated windows may
     // ignore or lag behind it. Reinforce synchronously on the new
@@ -1385,7 +1424,10 @@ sc_screen_restore_global_keyboard_layout_once(struct sc_screen *screen) {
     // the layout away.
     if (!after_hkl || after_hkl != original) {
         LOGW("Foreground thread layout not confirmed original after "
-             "targeted restore, skip IME reopen");
+             "targeted restore (after=0x%08lx, original=0x%08lx), "
+             "skip IME reopen",
+             (unsigned long) (uintptr_t) after_hkl,
+             (unsigned long) (uintptr_t) original);
         return true;
     }
     HIMC imc = ImmGetContext(fg);
@@ -1484,7 +1526,11 @@ sc_screen_apply_keyboard_layout(struct sc_screen *screen, bool english) {
             ime_restore_lang == 0x0004 || ime_restore_lang == 0x0008;
         HIMC imc = ImmGetContext(hwnd);
         if (imc) {
-            if (!screen->ime_open_saved_valid) {
+            if (screen->layout_forced || !screen->ime_open_saved_valid) {
+                // layout_forced==true means this period actually forced
+                // English: re-sample every period so the previous period's
+                // stale state is never restored; the !valid branch keeps an
+                // initial value even when LoadKeyboardLayout failed.
                 screen->ime_open_saved = ImmGetOpenStatus(imc) != FALSE;
                 screen->ime_open_saved_valid = true;
             }
@@ -1595,7 +1641,7 @@ sc_screen_handle_event(struct sc_screen *screen, const SDL_Event *event) {
             // not regain focus in the meantime (layout_forced is set again
             // on focus gain).
             if (screen->hid_keyboard && !screen->layout_forced) {
-                sc_screen_restore_global_keyboard_layout_once(screen);
+                sc_screen_restore_global_keyboard_layout_apply(screen);
             }
 #endif
             return;
@@ -1740,6 +1786,17 @@ sc_screen_handle_disconnection(struct sc_screen *screen) {
             case SDL_EVENT_WINDOW_EXPOSED:
                 sc_screen_render(screen, true);
                 break;
+            case SDL_EVENT_WINDOW_FOCUS_LOST:
+#ifdef _WIN32
+                // Device is already disconnected, no need to force English
+                // again; if it was forced, restore the global layout so the
+                // disconnection screen does not leave the system stuck on
+                // the English layout until the window is closed.
+                if (screen->hid_keyboard) {
+                    sc_screen_apply_keyboard_layout(screen, false);
+                }
+#endif
+                break;
             case SC_EVENT_DISCONNECTED_ICON_LOADED: {
                 SDL_Surface *icon_disconnected = event.user.data1;
                 assert(icon_disconnected);
@@ -1766,7 +1823,7 @@ sc_screen_handle_disconnection(struct sc_screen *screen) {
                 // Delayed retry arriving while the disconnection screen is
                 // shown: restore only if the layout is not forced again.
                 if (screen->hid_keyboard && !screen->layout_forced) {
-                    sc_screen_restore_global_keyboard_layout_once(screen);
+                    sc_screen_restore_global_keyboard_layout_apply(screen);
                 }
 #endif
                 break;
