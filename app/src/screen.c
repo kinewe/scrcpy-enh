@@ -1241,6 +1241,34 @@ sc_disconnect_on_timeout(struct sc_disconnect *d, void *userdata) {
 }
 
 #ifdef _WIN32
+// GetForegroundWindow() is wrong for UWP: the top-level
+// ApplicationFrameWindow lives in ApplicationFrameHost.exe, whose frame
+// thread keeps a stale HKL and does not receive layout changes.
+// GetGUIThreadInfo(0) returns the real foreground input thread (CoreWindow)
+// and its focused window.
+static DWORD
+sc_screen_get_input_thread(HWND *hwnd_out) {
+    GUITHREADINFO gti = { .cbSize = sizeof(gti) };
+    if (GetGUIThreadInfo(0, &gti)) {
+        HWND hwnd = gti.hwndFocus ? gti.hwndFocus
+                  : gti.hwndActive ? gti.hwndActive
+                  : NULL;
+        if (hwnd) {
+            if (hwnd_out) {
+                *hwnd_out = hwnd;
+            }
+            return GetWindowThreadProcessId(hwnd, NULL);
+        }
+    }
+
+    // Fallback: classic top-level foreground window.
+    HWND fg = GetForegroundWindow();
+    if (hwnd_out) {
+        *hwnd_out = fg;
+    }
+    return fg ? GetWindowThreadProcessId(fg, NULL) : 0;
+}
+
 // Read the "Use a different input method for each app window" setting.
 // The registry value is undocumented: when it is missing or unreadable,
 // assume disabled (the Windows default), which keeps the historical
@@ -1267,12 +1295,9 @@ sc_screen_per_app_ime_enabled(void) {
     // on, the new foreground thread keeps its own layout. If the foreground
     // thread is already on the original layout, the forced layout never
     // leaked -- treat it as per-app enabled and skip the global restore.
-    HWND fg = GetForegroundWindow();
-    if (!fg) {
-        return false;
-    }
-    DWORD fg_tid = GetWindowThreadProcessId(fg, NULL);
-    if (!fg_tid || fg_tid == GetCurrentThreadId()) {
+    HWND fg = NULL;
+    DWORD fg_tid = sc_screen_get_input_thread(&fg);
+    if (!fg || !fg_tid || fg_tid == GetCurrentThreadId()) {
         return false;
     }
     HKL fg_hkl = GetKeyboardLayout(fg_tid);
@@ -1294,6 +1319,8 @@ sc_screen_per_app_ime_enabled(void) {
 
 #define SC_KEYBOARD_LAYOUT_RESTORE_DELAY_MS 120
 #define SC_KEYBOARD_LAYOUT_RESTORE_SECOND_DELAY_MS 400
+#define SC_KEYBOARD_LAYOUT_RESTORE_THIRD_DELAY_MS 1000
+#define SC_KEYBOARD_LAYOUT_RESTORE_FOURTH_DELAY_MS 2000
 
 // Restore the system-wide keyboard layout after scrcpy lost focus.
 // Windows keyboard layouts are per-thread, but with the "Use a different
@@ -1366,20 +1393,26 @@ sc_screen_restore_global_keyboard_layout_apply(struct sc_screen *screen) {
     }
 
     // The broadcast is asynchronous and some TSF-integrated windows may
-    // ignore or lag behind it. Reinforce synchronously on the new
-    // foreground thread: WM_INPUTLANGCHANGEREQUEST is processed by the
-    // target thread itself (DefWindowProc activates the layout there), so
-    // SendMessageTimeout() waits until the target has handled it, without
-    // any polling.
-    HWND fg = GetForegroundWindow();
-    if (!fg) {
+    // ignore or lag behind it. Reinforce synchronously on the real input
+    // thread (GetGUIThreadInfo) -- not the top-level window, which for UWP
+    // is the ApplicationFrameHost frame thread with a stale HKL:
+    // WM_INPUTLANGCHANGEREQUEST is processed by the target thread itself
+    // (DefWindowProc activates the layout there), so SendMessageTimeout()
+    // waits until the target has handled it, without any polling.
+    HWND fg = NULL;
+    DWORD fg_tid = sc_screen_get_input_thread(&fg);
+    if (!fg || !fg_tid || fg_tid == GetCurrentThreadId()) {
         return false;
     }
-    DWORD fg_tid = GetWindowThreadProcessId(fg, NULL);
-    if (!fg_tid || fg_tid == GetCurrentThreadId()) {
-        // No foreground thread, or our own thread, whose layout has already
-        // been restored by the caller.
-        return false;
+
+    // Diagnostic: detect hosted/UWP windows (top-level and input threads
+    // differ), so logs can confirm which target was used.
+    HWND top = GetForegroundWindow();
+    DWORD top_tid = top ? GetWindowThreadProcessId(top, NULL) : 0;
+    if (top_tid && top_tid != fg_tid) {
+        LOGI("Foreground top-level thread %lu != input thread %lu "
+             "(hosted/UWP window), targeting input thread",
+             (unsigned long) top_tid, (unsigned long) fg_tid);
     }
 
     DWORD_PTR result = 0;
@@ -1407,25 +1440,43 @@ sc_screen_restore_global_keyboard_layout_apply(struct sc_screen *screen) {
     if (!screen->ime_restore_allowed) {
         return true;
     }
-    // Re-query the foreground window: the user may have switched again
-    // since the message was sent.
-    fg = GetForegroundWindow();
-    if (!fg) {
-        return true;
-    }
-    fg_tid = GetWindowThreadProcessId(fg, NULL);
-    if (!fg_tid || fg_tid == GetCurrentThreadId()) {
+    // Verify on the real input thread (not the top-level frame thread),
+    // re-querying because the user may have switched again.
+    fg = NULL;
+    fg_tid = sc_screen_get_input_thread(&fg);
+    if (!fg || !fg_tid || fg_tid == GetCurrentThreadId()) {
         return true;
     }
     HKL after_hkl = GetKeyboardLayout(fg_tid);
+    LOGI("After targeted restore: input thread %lu layout 0x%08lx",
+         (unsigned long) fg_tid, (unsigned long) (uintptr_t) after_hkl);
+
+    // The input thread may still be on English (UWP InputHost keeps its
+    // own state, or Word re-asserted it). Attach our input state to the
+    // real input thread and activate the layout there synchronously.
+    if ((!after_hkl || after_hkl != original)
+            && (!after_hkl
+                || ((unsigned long) (uintptr_t) after_hkl & 0xFFFF)
+                       == 0x0409)) {
+        if (AttachThreadInput(GetCurrentThreadId(), fg_tid, TRUE)) {
+            ActivateKeyboardLayout(original, 0);
+            AttachThreadInput(GetCurrentThreadId(), fg_tid, FALSE);
+            after_hkl = GetKeyboardLayout(fg_tid);
+            LOGI("AttachThreadInput fallback: input thread layout now "
+                 "0x%08lx", (unsigned long) (uintptr_t) after_hkl);
+        } else {
+            LOGW("AttachThreadInput to input thread %lu failed: %lu",
+                 (unsigned long) fg_tid, (unsigned long) GetLastError());
+        }
+    }
+
     // Require the layout to have actually returned to the original (Chinese)
     // layout -- not merely left English. If the user has switched to a third
     // language, opening the IME would activate the Chinese TIP and hijack
     // the layout away.
     if (!after_hkl || after_hkl != original) {
-        LOGW("Foreground thread layout not confirmed original after "
-             "targeted restore (after=0x%08lx, original=0x%08lx), "
-             "skip IME reopen",
+        LOGW("Input thread layout not confirmed original "
+             "(after=0x%08lx, original=0x%08lx), skip IME reopen",
              (unsigned long) (uintptr_t) after_hkl,
              (unsigned long) (uintptr_t) original);
         return true;
@@ -1462,12 +1513,18 @@ sc_screen_keyboard_layout_restore_timer(void *userdata, SDL_TimerID timer_id,
 static void
 sc_screen_restore_global_keyboard_layout(struct sc_screen *screen) {
 #ifdef _WIN32
-    // Diagnostic: capture the activation race direction on user machines.
-    HWND fg = GetForegroundWindow();
-    DWORD fg_tid = fg ? GetWindowThreadProcessId(fg, NULL) : 0;
-    HKL fg_hkl = fg_tid ? GetKeyboardLayout(fg_tid) : NULL;
-    LOGI("Focus lost: foreground thread %lu layout 0x%08lx",
-         (unsigned long) fg_tid, (unsigned long) (uintptr_t) fg_hkl);
+    // Diagnostic: capture the activation race direction on user machines,
+    // for both the top-level window and the real input thread (they differ
+    // for UWP/hosted windows).
+    HWND top = GetForegroundWindow();
+    DWORD top_tid = top ? GetWindowThreadProcessId(top, NULL) : 0;
+    HWND input_hwnd = NULL;
+    DWORD input_tid = sc_screen_get_input_thread(&input_hwnd);
+    HKL input_hkl = input_tid ? GetKeyboardLayout(input_tid) : NULL;
+    LOGI("Focus lost: top-level thread %lu, input thread %lu, layout "
+         "0x%08lx",
+         (unsigned long) top_tid, (unsigned long) input_tid,
+         (unsigned long) (uintptr_t) input_hkl);
 #endif
     bool retry = sc_screen_restore_global_keyboard_layout_once(screen);
     if (retry) {
@@ -1475,7 +1532,45 @@ sc_screen_restore_global_keyboard_layout(struct sc_screen *screen) {
                      sc_screen_keyboard_layout_restore_timer, NULL);
         SDL_AddTimer(SC_KEYBOARD_LAYOUT_RESTORE_SECOND_DELAY_MS,
                      sc_screen_keyboard_layout_restore_timer, NULL);
+        SDL_AddTimer(SC_KEYBOARD_LAYOUT_RESTORE_THIRD_DELAY_MS,
+                     sc_screen_keyboard_layout_restore_timer, NULL);
+        SDL_AddTimer(SC_KEYBOARD_LAYOUT_RESTORE_FOURTH_DELAY_MS,
+                     sc_screen_keyboard_layout_restore_timer, NULL);
     }
+}
+
+// Retry guards:
+//  - scrcpy regained focus (layout_forced) -> never restore;
+//  - the real input thread is already on original -> done, no churn;
+//  - the real input thread is on a third language -> never override.
+static void
+sc_screen_keyboard_layout_retry(struct sc_screen *screen) {
+    if (!screen->hid_keyboard || screen->layout_forced) {
+        return;
+    }
+
+    HWND input_hwnd = NULL;
+    DWORD input_tid = sc_screen_get_input_thread(&input_hwnd);
+    if (!input_hwnd || !input_tid || input_tid == GetCurrentThreadId()) {
+        return;
+    }
+
+    HKL current = GetKeyboardLayout(input_tid);
+    HKL original = (HKL) screen->original_hkl;
+    if (current && original && current == original) {
+        // Already restored; the attempt that won already handled IME.
+        return;
+    }
+    if (current && original && current != original) {
+        unsigned long lang = (unsigned long) (uintptr_t) current & 0xFFFF;
+        if (lang != 0x0409) {
+            LOGI("Keyboard layout retry skipped: input thread is on "
+                 "0x%04lx", lang);
+            return;
+        }
+    }
+
+    sc_screen_restore_global_keyboard_layout_apply(screen);
 }
 
 static void
@@ -1637,12 +1732,10 @@ sc_screen_handle_event(struct sc_screen *screen, const SDL_Event *event) {
             return;
         case SC_EVENT_KEYBOARD_LAYOUT_RESTORE:
 #ifdef _WIN32
-            // Delayed retry: re-apply the global restore only if scrcpy did
-            // not regain focus in the meantime (layout_forced is set again
-            // on focus gain).
-            if (screen->hid_keyboard && !screen->layout_forced) {
-                sc_screen_restore_global_keyboard_layout_apply(screen);
-            }
+            // Delayed retry with guards (see
+            // sc_screen_keyboard_layout_retry): only if scrcpy did not
+            // regain focus and the input thread is still on English.
+            sc_screen_keyboard_layout_retry(screen);
 #endif
             return;
         case SDL_EVENT_WINDOW_EXPOSED:
@@ -1821,10 +1914,8 @@ sc_screen_handle_disconnection(struct sc_screen *screen) {
             case SC_EVENT_KEYBOARD_LAYOUT_RESTORE:
 #ifdef _WIN32
                 // Delayed retry arriving while the disconnection screen is
-                // shown: restore only if the layout is not forced again.
-                if (screen->hid_keyboard && !screen->layout_forced) {
-                    sc_screen_restore_global_keyboard_layout_apply(screen);
-                }
+                // shown (guards in sc_screen_keyboard_layout_retry).
+                sc_screen_keyboard_layout_retry(screen);
 #endif
                 break;
             case SDL_EVENT_QUIT:
