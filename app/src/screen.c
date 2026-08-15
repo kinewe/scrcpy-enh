@@ -1321,6 +1321,7 @@ sc_screen_per_app_ime_enabled(void) {
 #define SC_KEYBOARD_LAYOUT_RESTORE_SECOND_DELAY_MS 400
 #define SC_KEYBOARD_LAYOUT_RESTORE_THIRD_DELAY_MS 1000
 #define SC_KEYBOARD_LAYOUT_RESTORE_FOURTH_DELAY_MS 2000
+#define SC_KEYBOARD_LAYOUT_RESTORE_FIFTH_DELAY_MS 5000
 
 // Restore the system-wide keyboard layout after scrcpy lost focus.
 // Windows keyboard layouts are per-thread, but with the "Use a different
@@ -1535,6 +1536,8 @@ sc_screen_restore_global_keyboard_layout(struct sc_screen *screen) {
         SDL_AddTimer(SC_KEYBOARD_LAYOUT_RESTORE_THIRD_DELAY_MS,
                      sc_screen_keyboard_layout_restore_timer, NULL);
         SDL_AddTimer(SC_KEYBOARD_LAYOUT_RESTORE_FOURTH_DELAY_MS,
+                     sc_screen_keyboard_layout_restore_timer, NULL);
+        SDL_AddTimer(SC_KEYBOARD_LAYOUT_RESTORE_FIFTH_DELAY_MS,
                      sc_screen_keyboard_layout_restore_timer, NULL);
     }
 }
