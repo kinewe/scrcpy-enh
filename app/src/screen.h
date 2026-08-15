@@ -140,6 +140,14 @@ struct sc_screen {
     // GetKeyboardLayout(0) after SDL_Init may return the Preload default of
     // the scrcpy thread instead of the user's actual layout.
     void *startup_hkl;
+    // TSF empty-document block (enabled by default): while the window has
+    // focus, an empty TSF document manager is focused on this thread so
+    // text services have no composition target. The global keyboard layout
+    // is never changed.
+    void *tsf_thread_mgr; // ITfThreadMgr*
+    void *tsf_empty_doc;  // ITfDocumentMgr*
+    bool tsf_ime_blocked;
+    bool tsf_ime_unavailable; // TSF init failed once: use HKL fallback
 #endif
 };
 

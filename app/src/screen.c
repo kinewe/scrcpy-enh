@@ -8,6 +8,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <windows.h>
+#include <imm.h>
+#define COBJMACROS
+#include <msctf.h>
+#include <objbase.h>
 #include <winreg.h>
 #endif
 
@@ -512,6 +516,10 @@ sc_screen_init(struct sc_screen *screen,
     screen->ime_open_saved_valid = false;
     screen->ime_restore_allowed = true;
     screen->startup_hkl = params->startup_hkl;
+    screen->tsf_thread_mgr = NULL;
+    screen->tsf_empty_doc = NULL;
+    screen->tsf_ime_blocked = false;
+    screen->tsf_ime_unavailable = false;
 #endif
 
     screen->video = params->video;
@@ -822,6 +830,8 @@ sc_screen_interrupt_disconnect(struct sc_screen *screen) {
 #ifdef _WIN32
 static void
 sc_screen_apply_keyboard_layout(struct sc_screen *screen, bool english);
+static void
+sc_screen_tsf_destroy(struct sc_screen *screen, HWND hwnd);
 #endif
 
 void
@@ -858,6 +868,10 @@ sc_screen_destroy(struct sc_screen *screen) {
     if (screen->hid_keyboard && screen->layout_forced) {
         sc_screen_apply_keyboard_layout(screen, false);
     }
+    HWND hwnd = (HWND) SDL_GetPointerProperty(
+            SDL_GetWindowProperties(screen->window),
+            SDL_PROP_WINDOW_WIN32_HWND_POINTER, NULL);
+    sc_screen_tsf_destroy(screen, hwnd);
 #endif
     SDL_DestroyWindow(screen->window);
     sc_fps_counter_destroy(&screen->fps_counter);
@@ -1241,6 +1255,147 @@ sc_disconnect_on_timeout(struct sc_disconnect *d, void *userdata) {
 }
 
 #ifdef _WIN32
+// TSF empty-document block, enabled by default: focus an empty document
+// manager on scrcpy's UI thread so text services (Sogou, Microsoft Pinyin)
+// have no composition target and pass keys through. This avoids
+// ActivateKeyboardLayout(00000409), which on Windows 8+ is system-wide while
+// this process owns focus and pollutes other windows' IME mode memory.
+// Set SCRCPY_IME_NO_TSF_BLOCK=1 to disable and use the legacy HKL path.
+static bool
+sc_screen_tsf_block_enabled(void) {
+    return getenv("SCRCPY_IME_NO_TSF_BLOCK") == NULL;
+}
+
+static bool
+sc_screen_tsf_block(struct sc_screen *screen, HWND hwnd) {
+    if (screen->tsf_ime_blocked) {
+        return true;
+    }
+    if (screen->tsf_ime_unavailable) {
+        return false;
+    }
+    if (!sc_screen_tsf_block_enabled()) {
+        LOGI("TSF block disabled via SCRCPY_IME_NO_TSF_BLOCK, using legacy "
+             "HKL forcing");
+        return false;
+    }
+
+    HRESULT hr = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+    if (hr != S_OK && hr != S_FALSE && hr != RPC_E_CHANGED_MODE) {
+        LOGW("CoInitializeEx failed for TSF block: 0x%08lx",
+             (unsigned long) hr);
+        screen->tsf_ime_unavailable = true;
+        return false;
+    }
+
+    HMODULE mod = LoadLibraryW(L"msctf.dll");
+    if (!mod) {
+        LOGW("Could not load msctf.dll for TSF block");
+        screen->tsf_ime_unavailable = true;
+        return false;
+    }
+
+    HRESULT (WINAPI *tf_get_thread_mgr)(ITfThreadMgr **) =
+        (HRESULT (WINAPI *)(ITfThreadMgr **)) (void *)
+            GetProcAddress(mod, "TF_GetThreadMgr");
+    HRESULT (WINAPI *tf_create_thread_mgr)(ITfThreadMgr **) =
+        (HRESULT (WINAPI *)(ITfThreadMgr **)) (void *)
+            GetProcAddress(mod, "TF_CreateThreadMgr");
+
+    ITfThreadMgr *tm = NULL;
+    if ((!tf_get_thread_mgr || FAILED(tf_get_thread_mgr(&tm)))
+            && (!tf_create_thread_mgr
+                || FAILED(tf_create_thread_mgr(&tm)))) {
+        LOGW("Could not create TSF thread manager");
+        screen->tsf_ime_unavailable = true;
+        return false;
+    }
+
+    TfClientId client_id = 0;
+    hr = ITfThreadMgr_Activate(tm, &client_id);
+    if (FAILED(hr)) {
+        LOGW("Could not activate TSF thread manager: 0x%08lx",
+             (unsigned long) hr);
+        ITfThreadMgr_Release(tm);
+        screen->tsf_ime_unavailable = true;
+        return false;
+    }
+
+    ITfDocumentMgr *empty = NULL;
+    hr = ITfThreadMgr_CreateDocumentMgr(tm, &empty);
+    if (FAILED(hr) || !empty) {
+        LOGW("Could not create empty TSF document manager: 0x%08lx",
+             (unsigned long) hr);
+        ITfThreadMgr_Deactivate(tm);
+        ITfThreadMgr_Release(tm);
+        screen->tsf_ime_unavailable = true;
+        return false;
+    }
+
+    // Associate the empty document with the window so TSF keeps it focused
+    // on WM_ACTIVATE, then set it as the current focus immediately.
+    ITfDocumentMgr *previous = NULL;
+    hr = ITfThreadMgr_AssociateFocus(tm, hwnd, empty, &previous);
+    if (FAILED(hr)) {
+        LOGW("Could not associate empty TSF document: 0x%08lx",
+             (unsigned long) hr);
+    }
+    if (previous) {
+        ITfDocumentMgr_Release(previous);
+    }
+
+    hr = ITfThreadMgr_SetFocus(tm, empty);
+    if (FAILED(hr)) {
+        LOGW("Could not focus empty TSF document: 0x%08lx",
+             (unsigned long) hr);
+        ITfDocumentMgr *prev = NULL;
+        ITfThreadMgr_AssociateFocus(tm, hwnd, NULL, &prev);
+        if (prev) {
+            ITfDocumentMgr_Release(prev);
+        }
+        ITfDocumentMgr_Release(empty);
+        ITfThreadMgr_Deactivate(tm);
+        ITfThreadMgr_Release(tm);
+        screen->tsf_ime_unavailable = true;
+        return false;
+    }
+
+    screen->tsf_thread_mgr = tm;
+    screen->tsf_empty_doc = empty;
+    screen->tsf_ime_blocked = true;
+    LOGI("TSF empty document focused: IME bypassed in-process, global "
+         "keyboard layout untouched");
+    return true;
+}
+
+static void
+sc_screen_tsf_destroy(struct sc_screen *screen, HWND hwnd) {
+    if (screen->tsf_thread_mgr && hwnd) {
+        ITfThreadMgr *tm = (ITfThreadMgr *) screen->tsf_thread_mgr;
+        ITfDocumentMgr *previous = NULL;
+        // Disassociate before releasing: TSF does not AddRef the attached
+        // document manager, so it must not outlive our reference.
+        ITfThreadMgr_AssociateFocus(tm, hwnd, NULL, &previous);
+        if (previous) {
+            ITfDocumentMgr_Release(previous);
+        }
+        // Chromium does the same despite the docs saying pdimFocus cannot
+        // be NULL; it works on Windows 8+ and releases TSF focus.
+        ITfThreadMgr_SetFocus(tm, NULL);
+    }
+    if (screen->tsf_empty_doc) {
+        ITfDocumentMgr_Release((ITfDocumentMgr *) screen->tsf_empty_doc);
+        screen->tsf_empty_doc = NULL;
+    }
+    if (screen->tsf_thread_mgr) {
+        ITfThreadMgr *tm = (ITfThreadMgr *) screen->tsf_thread_mgr;
+        ITfThreadMgr_Deactivate(tm);
+        ITfThreadMgr_Release(tm);
+        screen->tsf_thread_mgr = NULL;
+    }
+    screen->tsf_ime_blocked = false;
+}
+
 // MinGW's imm.h omits the WM_IME_CONTROL subcommands; values are the
 // documented IMC_* codes used by the default IME window.
 #define IMC_GETCONVERSIONMODE 0x0001
@@ -1625,11 +1780,13 @@ sc_screen_restore_global_keyboard_layout(struct sc_screen *screen) {
 
 // Retry guards:
 //  - scrcpy regained focus (layout_forced) -> never restore;
+//  - TSF block is active -> HKL was never changed, nothing to restore;
 //  - the real input thread is already on original -> done, no churn;
 //  - the real input thread is on a third language -> never override.
 static void
 sc_screen_keyboard_layout_retry(struct sc_screen *screen) {
-    if (!screen->hid_keyboard || screen->layout_forced) {
+    if (!screen->hid_keyboard || screen->layout_forced
+            || screen->tsf_ime_blocked) {
         return;
     }
 
@@ -1674,6 +1831,11 @@ sc_screen_apply_keyboard_layout(struct sc_screen *screen, bool english) {
         return;
     }
     if (english) {
+        if (sc_screen_tsf_block(screen, hwnd)) {
+            // The IME is bypassed in-process and HKL was not changed:
+            // nothing leaks to other windows and no restore is needed.
+            return;
+        }
         if (screen->layout_forced) {
             // Already forced: keep the current state, do not re-activate.
             return;
@@ -1822,6 +1984,11 @@ sc_screen_handle_event(struct sc_screen *screen, const SDL_Event *event) {
         case SDL_EVENT_WINDOW_FOCUS_LOST:
 #ifdef _WIN32
             if (screen->hid_keyboard) {
+                if (screen->tsf_ime_blocked) {
+                    // HKL was never changed: leave every other window
+                    // exactly as it was.
+                    return;
+                }
                 sc_screen_apply_keyboard_layout(screen, false);
             }
 #endif
@@ -1980,8 +2147,10 @@ sc_screen_handle_disconnection(struct sc_screen *screen) {
                 // Device is already disconnected, no need to force English
                 // again; if it was forced, restore the global layout so the
                 // disconnection screen does not leave the system stuck on
-                // the English layout until the window is closed.
-                if (screen->hid_keyboard) {
+                // the English layout until the window is closed. With the
+                // TSF block active, HKL was never changed and there is
+                // nothing to restore.
+                if (screen->hid_keyboard && !screen->tsf_ime_blocked) {
                     sc_screen_apply_keyboard_layout(screen, false);
                 }
 #endif
