@@ -1558,20 +1558,20 @@ sc_screen_restore_global_keyboard_layout_apply(struct sc_screen *screen) {
         }
         ImmReleaseContext(imc_owner, imc);
         LOGI("Foreground window IME restored (saved open state)");
-    } else if (!screen->ime_open_saved_valid || screen->ime_open_saved) {
-        // TSF-only control (Word document, UWP): no HIMC. For classic
-        // Win32 windows the hidden default IME window still works; force
-        // native conversion mode as best effort (same policy as the
-        // existing "unknown -> reopen" fallback). UWP has no such window
-        // and WM_IME_CONTROL is ignored there.
+    } else {
+        // TSF-only control (Word document, UWP, Chrome): no HIMC. For
+        // classic Win32 windows the hidden default IME window still works;
+        // force native conversion mode unconditionally -- the saved open
+        // state above is scrcpy's OWN window state (always closed) and
+        // says nothing about the user's 中/英 mode in the target app, so
+        // it must not gate this restore. UWP has no such window and
+        // WM_IME_CONTROL is ignored there.
         if (sc_screen_ime_set_native(fg)) {
             LOGI("Foreground IME conversion mode restored to native");
         } else {
             LOGW("No IMM32/IME window for foreground control, IME mode "
                  "not restored (TSF-only/UWP)");
         }
-    } else {
-        LOGI("IME mode restore skipped (saved state was closed)");
     }
     return true;
 }
@@ -1644,10 +1644,10 @@ sc_screen_keyboard_layout_retry(struct sc_screen *screen) {
     if (current && original && current == original) {
         // Layout already restored. The remaining failure mode is the TSF
         // conversion mode (Chinese layout but English mode): retry it via
-        // the classic default-IME-window path. UWP has no such window, so
-        // this is a no-op there.
+        // the classic default-IME-window path (unconditionally -- the
+        // saved open state reflects scrcpy's own window, not the target
+        // app). UWP has no such window, so this is a no-op there.
         if (screen->ime_restore_allowed
-                && (!screen->ime_open_saved_valid || screen->ime_open_saved)
                 && !sc_screen_ime_is_native(input_hwnd)) {
             sc_screen_ime_set_native(input_hwnd);
         }
