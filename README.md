@@ -2,9 +2,9 @@
 
 基于 [scrcpy 4.1](https://github.com/Genymobile/scrcpy) 的增强构建，面向「电脑 ↔ Android 移动设备」投屏协同场景，在官方版本之上提供自适应码率、状态显示、图片剪贴板等实用增强功能。
 
-> **v1.4 已正式发布**（master 分支）——[Release 下载](https://github.com/kinewe/PC-kinewe-yinmo/releases/tag/v1.4)（zip 含全部运行库，解压即用）
+> **v1.5 已正式发布**（master 分支）——[Release 下载](https://github.com/kinewe/PC-kinewe-yinmo/releases/tag/v1.5)（zip 含全部运行库，解压即用）
 >
-> 历史版本：[v1.3.1](https://github.com/kinewe/PC-kinewe-yinmo/releases/tag/v1.3.1) 及更早见 Release 列表
+> 历史版本：[v1.4](https://github.com/kinewe/PC-kinewe-yinmo/releases/tag/v1.4) 及更早见 Release 列表
 
 ---
 
@@ -19,6 +19,7 @@
 | 📐 **动态规格分配** | v1.2.1 | 插线时读取设备分辨率/刷新率，动态分配串流规格 |
 | ⚡ **ABR 双维自适应** | v1.3 | 码率 + 帧率双维自适应降级/恢复，压力下保持跟手 |
 | 📊 **投屏状态控件** | v1.3.1 | 右上角实时显示 帧率/码率/连接模式，Alt+拖动可移动，Ctrl+F 开关 |
+| ⌨️ **TSF 空文档屏蔽** | v1.5 | 输入法不抢键、切回电脑应用永远中文——QQ/Word/UWP 输入模式残留根治 |
 
 ---
 
@@ -97,9 +98,30 @@
 
 ---
 
+## ⌨️ v1.5 里程碑：TSF 空文档屏蔽（输入法问题根治）
+
+### 问题背景
+
+uhid 键盘模式下，电脑中文输入法（搜狗/微软拼音）可能拦截按键——旧方案是获焦时把系统键盘布局切成英文（00000409），失焦时再恢复。但 Windows 8+ 在窗口拥有焦点时切换布局是**系统级**的，会污染其他窗口的布局和输入法模式记忆——导致切回 QQ/Word/记事本时输入法停在英文（打字出英文）。
+
+### TSF 空文档屏蔽方案
+
+获焦时在 scrcpy 窗口聚焦一个**空的 TSF 文档**——输入法在投屏窗口内没有组合目标，按键直接放行；**全局键盘布局从头到尾没有变过**，其他窗口的输入法状态完全不受影响。
+
+```
+投屏窗口获焦 → 聚焦空 TSF 文档 → 输入法不抢键（uhid 按键直达手机）
+切回 QQ/Word → 布局/输入法模式从未被动过 → 永远中文 ✅
+```
+
+### 回退开关
+
+TSF 方案默认启用。如遇输入法异常，双击 `TSF旧路径回退.bat` 启动（等效设置环境变量 `SCRCPY_IME_NO_TSF_BLOCK=1`），退回旧的布局切换方案。
+
+---
+
 ## 🚀 快速开始
 
-1. 下载 [v1.3.1 Release](https://github.com/kinewe/PC-kinewe-yinmo/releases/tag/v1.3.1) 的 zip，解压到任意目录
+1. 下载 [v1.5 Release](https://github.com/kinewe/PC-kinewe-yinmo/releases/tag/v1.5) 的 zip，解压到任意目录
 2. 手机开启 **开发者选项 → USB 调试**（无线使用还需开启「USB 调试（安全设置）」并重启手机）
 3. **USB 插线** 双击 `手机投屏.bat` → 自动有线串流（50M/2560/120fps 动态规格）
 4. **拔线** → 5 秒后自动切换无线（15M/1920/60fps，WiFi 需与电脑同网段）
@@ -144,6 +166,7 @@ A：无线规格 15M/1920/60fps，受 WiFi 抖动影响（28-30ms 常态抖动�
 
 | 版本 | 内容 |
 |---|---|
+| **v1.5** | TSF 空文档屏蔽（输入法不抢键 + 切回应用永远中文，QQ/Word/UWP 模式残留根治）、TSF旧路径回退.bat 自救开关 |
 | **v1.4** | GL 满档减帧修复（120 档真满血）、fps 档位全链路生效、overlay S 字形 + Ctrl+F 开关、全量代码审查加固 |
 | v1.3.1 | 投屏状态控件（实际/档位 fps + 实时码率 + USB/WIFI，Alt+拖动可移动） |
 | v1.3 | ABR 双维自适应（码率+帧率）、90fps 缓冲搭档档、恢复链提速/防抖、降档退避 |
