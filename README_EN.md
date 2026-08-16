@@ -17,7 +17,7 @@
 
 Enter **Developer Mode** on your phone/tablet, enable **USB Debugging**, and allow simulating click actions via USB debugging (e.g. Xiaomi devices also need **USB debugging (Security settings)**).
 
-![Enable permissions](images/setup-permissions.jpeg)
+<img src="images/setup-permissions.jpeg" alt="Enable permissions" width="600">
 
 **Step 2: Connect**
 
@@ -40,8 +40,8 @@ Connect the PC and device with a USB cable, then run **`投屏启动.bat`**:
 
 Type directly into the mirror window with your PC keyboard — no extra setup.
 
-![Typing 1](images/typing-1.jpeg)
-![Typing 2](images/typing-2.jpeg)
+<img src="images/typing-1.jpeg" alt="Typing 1" width="360">
+<img src="images/typing-2.jpeg" alt="Typing 2" width="360">
 
 > Note: **Android 13+** required for UHID keyboard; older versions cannot type directly.
 
@@ -49,15 +49,15 @@ Type directly into the mirror window with your PC keyboard — no extra setup.
 
 Adopts scrcpy PR #6676 — not just text: **images** copied on the PC also enter the device clipboard.
 
-![Image clipboard](images/clipboard-1.jpeg)
+<img src="images/clipboard-1.jpeg" alt="Image clipboard" width="700">
 
 In apps that support clipboard images, you can **paste and send** (long-press the input field and select Paste / Ctrl+V), e.g. WeChat:
 
-![WeChat paste example](images/clipboard-wechat.jpeg)
+<img src="images/clipboard-wechat.jpeg" alt="WeChat paste example" width="600">
 
 > Note: Apps may recompress/reformat clipboard images — direct paste may be blurry (GIFs become static). Press **Ctrl+G** to save the image to the device gallery, then send the original from there. (Gallery save works on Android 7.0+, but the clipboard may not show the image.)
 
-![Gallery example](images/clipboard-gallery.jpeg)
+<img src="images/clipboard-gallery.jpeg" alt="Gallery example" width="700">
 
 ### 🎯 Responsive Picture
 

@@ -17,7 +17,7 @@
 
 进入手机/平板的**开发者模式**后，打开 **USB 调试**开关，并允许通过 USB 调试模拟点击行为（例如小米设备还需打开 **USB 调试（安全设置）**）。
 
-![开放权限](images/setup-permissions.jpeg)
+<img src="images/setup-permissions.jpeg" alt="开放权限" width="600">
 
 **第二步：连接电脑**
 
@@ -40,9 +40,9 @@
 
 无需额外设置，即可直接在投屏窗口利用电脑键盘输入。
 
-![打字友好 1](images/typing-1.jpeg)
+<img src="images/typing-1.jpeg" alt="打字友好 1" width="360">
 
-![打字友好 2](images/typing-2.jpeg)
+<img src="images/typing-2.jpeg" alt="打字友好 2" width="360">
 
 > 注：至少为 **Android 13+** 支持 UHID 键盘，低于该版本将无法直接输入。
 
@@ -50,15 +50,15 @@
 
 吸取了 scrcpy PR #6676 功能——不止是文本，电脑端到移动端复制的**各类图片**也能进入移动端设备剪贴板。
 
-![图片剪贴板](images/clipboard-1.jpeg)
+<img src="images/clipboard-1.jpeg" alt="图片剪贴板" width="700">
 
 在支持剪贴板发送图片的应用里可以**粘贴与发送**（输入栏长按并选粘贴 / Ctrl+V），例如微信：
 
-![微信粘贴示例](images/clipboard-wechat.jpeg)
+<img src="images/clipboard-wechat.jpeg" alt="微信粘贴示例" width="600">
 
 > 注：移动端应用发送剪贴板图片时可能进行裁切与转化，直接粘贴会模糊（动图不动等）——此时按 **Ctrl+G** 将该图保存至手机（平板）相册，再打开相册用原图发送即可。（保存相册功能 Android 7.0+ 可用，但剪贴板可能不显示。）
 
-![保存相册示例](images/clipboard-gallery.jpeg)
+<img src="images/clipboard-gallery.jpeg" alt="保存相册示例" width="700">
 
 > 保存后点击相册找图发送！
 
