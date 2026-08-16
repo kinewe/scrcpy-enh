@@ -3,6 +3,7 @@ package com.genymobile.scrcpy.video;
 import com.genymobile.scrcpy.AndroidVersions;
 import com.genymobile.scrcpy.AsyncProcessor;
 import com.genymobile.scrcpy.Options;
+import com.genymobile.scrcpy.control.Controller;
 import com.genymobile.scrcpy.control.DeviceMessage;
 import com.genymobile.scrcpy.control.DeviceMessageSender;
 import com.genymobile.scrcpy.device.Streamer;
@@ -95,13 +96,28 @@ public class SurfaceEncoder implements AsyncProcessor {
     private static final long ABR_FPS_RESTORE_OVERLOAD_WINDOW_NS = 1_000_000_000L; // 1s
     private static final long ABR_DELAY_TRIGGER_MS = 30; // window avg delay delta (ms) above baseline -> overloaded (more sensitive)
     // Instant single-frame trigger: a single frame whose calibrated
-    // delayDelta exceeds this threshold degrades immediately (no window
-    // wait), catching startup bursts within ~10ms. The down-chain is
-    // debounced by ABR_INSTANT_INTERVAL_NS (5ms), so the 3-step chain
-    // (60M->18M->5.4M->1M) completes in ~15ms.
-    private static final long ABR_INSTANT_TRIGGER_MS = 25; // 25ms: above the 21-22ms static-scene jitter (20ms caused oscillation), animations reach 50-300ms so response stays instant
+    // delayDelta exceeds this threshold degrades the BITRATE immediately (no
+    // window wait), catching startup bursts within ~10ms. 35ms: the old 25ms
+    // threshold fired on 26-32ms static jitter and caused constant 60M<->42M
+    // bitrate churn; fps decisions have their own higher evidence bar below.
+    private static final long ABR_INSTANT_TRIGGER_MS = 35; // 35ms: above the 21-22ms static-scene jitter with margin
     private static final long ABR_MILD_INSTANT_MS = 100; // instant overload below this is MILD (25-100ms: the delay-trend + gentle x0.7 layers already cover 20-80ms queueing, so fps joins the fast path only on backlog >=90ms per ABR_FPS_OVERLOAD_MS); >=100ms is a real overload and drops hard x0.3 + counts for the fps streak
     private static final long ABR_FPS_OVERLOAD_MS = 90; // fps streak counts overloads >=90ms (fps degrade is more decisive than waiting for the window); MILD 100ms stays for the bitrate gentle/aggressive split and the recovery debounce
+    // Fps evidence bar: only delay events >=40ms may touch the fps level
+    // (buffer 90, mild-overload branch, single-animation burst). 26-36ms
+    // events stay a bitrate-only matter, so low-delay jitter does not churn
+    // 120<->90<->60. The tablet app-open bursts that matter are 42-62ms.
+    private static final long ABR_FPS_EVIDENCE_MS = 40; // fps decisions require >=40ms
+    // Interactive vs idle thresholds: while the user is actively injecting
+    // input, the encoder must stay snappy (the 35/40/30/20ms bars above).
+    // After the last input, video playback/static screens switch to tolerant
+    // idle bars so 30-49ms video jitter no longer drives bitrate to 1M or
+    // churns the fps level. One input immediately re-arms the sharp bars.
+    private static final long ABR_INTERACTION_ACTIVE_NS = 2_000_000_000L; // input within 2s => interactive
+    private static final long ABR_IDLE_INSTANT_TRIGGER_MS = 60; // idle bitrate instant trigger
+    private static final long ABR_IDLE_DELAY_TRIGGER_MS = 50; // idle window overload threshold
+    private static final long ABR_IDLE_FPS_EVIDENCE_MS = 80; // idle fps evidence bar
+    private static final long ABR_IDLE_DELAY_RECOVER_MS = 35; // idle "healthy" bar (video jitter can recover)
     private static final long ABR_INSTANT_INTERVAL_NS = 5_000_000L; // 5ms debounce between instant triggers (fast response: 3-step chain 60M->18M->5.4M->1M in ~15ms)
     // The window overload threshold is 30ms (ABR_DELAY_TRIGGER_MS, above
     // the 21-22ms static-scene jitter): with a 50ms window the mean is more
@@ -716,7 +732,7 @@ public class SurfaceEncoder implements AsyncProcessor {
         }
         lastDelayDeltaMs = delayDelta;
         if (trendStreak >= 3 && nowNs - abrLastDownNs >= 50_000_000L
-                && currentBitRate > ABR_MIN_BITRATE) {
+                && currentBitRate > ABR_MILD_FPS_BITRATE_THRESHOLD) {
             abrLastDownNs = nowNs;
             if (nowNs - abrTrendLogNs >= 1_000_000_000L) {
                 Ln.i("ABR: delay trend rising (streak=" + trendStreak
@@ -730,7 +746,7 @@ public class SurfaceEncoder implements AsyncProcessor {
         // waiting a full window). Unified 80ms debounce for the down chain;
         // the window detection below remains as a backstop. Restore/ceiling
         // mechanism is untouched.
-        if (delayDelta > ABR_INSTANT_TRIGGER_MS) {
+        if (delayDelta > instantTriggerMs(nowNs)) {
             // The fps-degrade streak counts REAL overloads only (>=90ms):
             // mild blips (<100ms) must never drop the frame rate — at the
             // 1M floor they used to trip streak=3 and oscillate fps 120<->60
@@ -774,7 +790,7 @@ public class SurfaceEncoder implements AsyncProcessor {
                 // overload as one evidence event even when the bitrate is
                 // still high. Real overloads (>=90ms) stay on the existing
                 // fast path and do not participate in the burst.
-                if (delayDelta >= ABR_DELAY_TRIGGER_MS && delayDelta < ABR_FPS_OVERLOAD_MS) {
+                if (delayDelta >= fpsEvidenceThreshold(nowNs) && delayDelta < ABR_FPS_OVERLOAD_MS) {
                     if (noteFullFpsOverloadBurst(codec, nowNs)) {
                         onOverload(codec, nowNs, !isKeyFrame, wasRestoring, delayDelta);
                         return;
@@ -813,7 +829,7 @@ public class SurfaceEncoder implements AsyncProcessor {
 
         // Static screens produce almost no frames: never treat them as overload.
         boolean staticScreen = actual < ABR_MIN_FRAMES_IN_WINDOW;
-        boolean delayOk = delayAvg < ABR_DELAY_TRIGGER_MS;
+        boolean delayOk = delayAvg < delayTriggerMs(nowNs);
         // Only the encoder output delay (delta vs calibrated baseline) is the
         // overload signal: a low frame count alone is NOT overload (the source
         // may render few frames, e.g. animations or idle scenes).
@@ -833,9 +849,9 @@ public class SurfaceEncoder implements AsyncProcessor {
             if (notePersistentMildOverload(codec, nowNs, delayAvg)) {
                 return;
             }
-            // Count this window overload as burst evidence too (mild band
-            // only: real >=90ms overloads keep their existing semantics).
-            if (delayAvg < ABR_FPS_OVERLOAD_MS) {
+            // Count this window overload as burst evidence too (only at the
+            // fps evidence bar; 30-39ms averages remain bitrate-only).
+            if (delayAvg >= fpsEvidenceThreshold(nowNs) && delayAvg < ABR_FPS_OVERLOAD_MS) {
                 noteFullFpsOverloadBurst(codec, nowNs);
             }
             if (restoring || nowNs - abrLastDownNs >= ABR_MIN_DOWN_INTERVAL_NS) {
@@ -891,7 +907,7 @@ public class SurfaceEncoder implements AsyncProcessor {
             if (nowNs - fpsStableSinceNs >= ABR_FPS_STABLE_PROBE_NS
                     && currentBitRate < ABR_EARLY_BITRATE_RESTORE_MAX
                     && currentBitRate < videoBitRate
-                    && delayAvg < ABR_DELAY_RECOVER_MS
+                    && delayAvg < delayRecoverMs(nowNs)
                     && nowNs - abrLastUpNs >= (currentBitRate < ABR_FAST_UP_THRESHOLD
                             ? ABR_MIN_UP_INTERVAL_FAST_NS : ABR_MIN_UP_INTERVAL_NS)) {
                 Ln.i("ABR: early bitrate restore below full fps (fps=" + abrFps
@@ -918,7 +934,7 @@ public class SurfaceEncoder implements AsyncProcessor {
                 && currentBitRate < videoBitRate
                 && nowNs - abrLastUpNs >= (currentBitRate < ABR_FAST_UP_THRESHOLD
                         ? ABR_MIN_UP_INTERVAL_FAST_NS : ABR_MIN_UP_INTERVAL_NS)
-                && delayAvg < ABR_DELAY_RECOVER_MS) {
+                && delayAvg < delayRecoverMs(nowNs)) {
             // reached the target again: restore phase finished
             abrRestoring = false;
             raiseBitrate(codec, nowNs);
@@ -977,7 +993,7 @@ public class SurfaceEncoder implements AsyncProcessor {
                 if (++fpsRecoverOverloads >= 2) {
                     fpsRecoverOverloads = 0;
                     revertFps(codec, nowNs);
-                } else if (currentBitRate > ABR_MIN_BITRATE) {
+                } else if (currentBitRate > ABR_MILD_FPS_BITRATE_THRESHOLD) {
                     lowerBitrate(codec, nowNs); // lone spike: bitrate only
                 }
             } else {
@@ -1005,22 +1021,33 @@ public class SurfaceEncoder implements AsyncProcessor {
         } else {
             fpsRecoverOverloads = 0; // healthy/mild frames reset the debounce
         }
-        // Fast-degrade path: a REAL overload (instant >=90ms) drops fps
-        // immediately — 120->60->30, no 90 mid-step (90 is the buffer
-        // partner, not a fast-path step). Lone I-frame spikes
-        // (probeSensitive = false) still concede bitrate only.
+        // Staged bitrate-first fast path: a REAL overload (instant >=90ms)
+        // consumes the bitrate buffer first and the fps level stays stable.
+        // fps drops only when the bitrate is already low (<=5M below target
+        // or at the 1M floor) and the overload persists. This avoids
+        // simultaneous fps+bitrate adjustments and states like 60fps+42M.
         if (probeSensitive && instantOverloadStreak >= ABR_FPS_INSTANT_STREAK) {
-            if (nowNs < fpsDropCooldownUntilNs) {
-                if (nowNs - abrFpsCooldownLogNs >= 1_000_000_000L) {
-                    Ln.i("ABR: fps drop cooldown (draining old frames)");
-                    abrFpsCooldownLogNs = nowNs;
+            boolean bitrateAlreadyLow = isLowBitrateFpsTier();
+            if (bitrateAlreadyLow) {
+                if (nowNs < fpsDropCooldownUntilNs) {
+                    if (nowNs - abrFpsCooldownLogNs >= 1_000_000_000L) {
+                        Ln.i("ABR: fps drop cooldown (draining old frames)");
+                        abrFpsCooldownLogNs = nowNs;
+                    }
+                    return;
                 }
+                lowerFps(codec, nowNs);
                 return;
             }
-            lowerFps(codec, nowNs);
-            return;
+            // Bitrate still has room: fall through to the bitrate path below
+            // and let it consume this overload; fps stays unchanged.
         }
         if (currentBitRate > ABR_MIN_BITRATE) {
+            if (isLowBitrateFpsTier()) {
+                // Bitrate buffer exhausted: further bitrate cuts cannot help.
+                // The fps evidence paths above/outside own the response.
+                return;
+            }
             // MILD instant blip (30-80ms) concedes gently (x0.7): it is a
             // momentary hiccup — bouncing the bitrate back to the floor on
             // a 39ms blip created the 1M<->2M restore loops the user saw
@@ -1054,8 +1081,11 @@ public class SurfaceEncoder implements AsyncProcessor {
             // at full fps (120), drop to 90 together — 90 is the buffer
             // partner (at 120fps the bitrate buffer alone cannot keep the
             // stream responsive: only bitrate callbacks were seen, no 90
-            // step). No-op when fps is already below 120.
-            if (abrFps == ABR_FPS_LEVELS[0]) {
+            // step). Only delay events at/above the fps evidence bar (or
+            // window/complex overloads) may touch fps: 35-39ms instant
+            // events are bitrate-only. No-op when fps is already below 120.
+            if (abrFps == ABR_FPS_LEVELS[0]
+                    && (delayDelta < 0 || delayDelta >= fpsEvidenceThreshold(nowNs))) {
                 if (noteFullFpsOverloadBurst(codec, nowNs)) {
                     // This 120->90 buffer drop completed a single-animation
                     // burst: the fast path already took 120->60. Skip the 90
@@ -1185,7 +1215,7 @@ public class SurfaceEncoder implements AsyncProcessor {
             abrMildOverloadCount = 0;
             return false;
         }
-        if (delayDelta < ABR_DELAY_TRIGGER_MS) {
+        if (delayDelta < fpsEvidenceThreshold(nowNs)) {
             return false;
         }
         // One evidence event per 100ms: a burst of 3 consecutive slow frames
@@ -1230,13 +1260,47 @@ public class SurfaceEncoder implements AsyncProcessor {
         return true;
     }
 
-    private boolean isMildFpsCandidate() {
+    private boolean isLowBitrateFpsTier() {
         // The rate must already be reduced below the configured target and
         // at <=5M, OR be at the absolute 1M floor (a configured floor counts
         // too: bitrate can no longer act as the buffer).
         return currentBitRate == ABR_MIN_BITRATE
                 || (currentBitRate < videoBitRate
                         && currentBitRate <= ABR_MILD_FPS_BITRATE_THRESHOLD);
+    }
+
+    private boolean isMildFpsCandidate() {
+        return isLowBitrateFpsTier();
+    }
+
+    private boolean interactiveNow(long nowNs) {
+        long lastInteractionNs = Controller.getLastInteractionNs();
+        return lastInteractionNs > 0 && nowNs - lastInteractionNs < ABR_INTERACTION_ACTIVE_NS;
+    }
+
+    private long instantTriggerMs(long nowNs) {
+        return interactiveNow(nowNs) ? ABR_INSTANT_TRIGGER_MS : ABR_IDLE_INSTANT_TRIGGER_MS;
+    }
+
+    private long delayTriggerMs(long nowNs) {
+        return interactiveNow(nowNs) ? ABR_DELAY_TRIGGER_MS : ABR_IDLE_DELAY_TRIGGER_MS;
+    }
+
+    private long delayRecoverMs(long nowNs) {
+        return interactiveNow(nowNs) ? ABR_DELAY_RECOVER_MS : ABR_IDLE_DELAY_RECOVER_MS;
+    }
+
+    /**
+     * fps evidence bar is bitrate-aware and interaction-aware. Interactive:
+     * at low bitrate the bitrate buffer is exhausted so 30ms already
+     * qualifies; at high bitrate 40ms. Idle (video/static): always 80ms —
+     * 30-49ms video jitter must not churn fps or drive the bitrate to 1M.
+     */
+    private long fpsEvidenceThreshold(long nowNs) {
+        if (!interactiveNow(nowNs)) {
+            return ABR_IDLE_FPS_EVIDENCE_MS;
+        }
+        return isLowBitrateFpsTier() ? ABR_DELAY_TRIGGER_MS : ABR_FPS_EVIDENCE_MS;
     }
 
     private void lowerFps(MediaCodec codec, long nowNs) {

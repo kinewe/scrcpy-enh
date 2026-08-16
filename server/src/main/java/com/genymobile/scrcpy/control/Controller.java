@@ -71,6 +71,21 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
         }
     }
 
+    /**
+     * Last user-input instant (elapsedRealtimeNanos), shared with the video
+     * ABR so it can switch between interactive and idle thresholds. Static:
+     * the scrcpy server runs a single controller per session.
+     */
+    private static volatile long lastInteractionNs;
+
+    public static long getLastInteractionNs() {
+        return lastInteractionNs;
+    }
+
+    private static void markInteraction() {
+        lastInteractionNs = SystemClock.elapsedRealtimeNanos();
+    }
+
     private static final int DEFAULT_DEVICE_ID = 0;
 
     // control_msg.h values of the pointerId field in inject_touch_event message
@@ -368,38 +383,46 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
         if (!camera) {
             switch (type) {
                 case ControlMessage.TYPE_INJECT_KEYCODE:
+                    markInteraction();
                     if (supportsInputEvents) {
                         injectKeycode(msg.getAction(), msg.getKeycode(), msg.getRepeat(), msg.getMetaState());
                     }
                     return true;
                 case ControlMessage.TYPE_INJECT_TEXT:
+                    markInteraction();
                     if (supportsInputEvents) {
                         injectText(msg.getText());
                     }
                     return true;
                 case ControlMessage.TYPE_INJECT_TOUCH_EVENT:
+                    markInteraction();
                     if (supportsInputEvents) {
                         injectTouch(
                                 msg.getAction(), msg.getPointerId(), msg.getPosition(), msg.getPressure(), msg.getActionButton(), msg.getButtons());
                     }
                     return true;
                 case ControlMessage.TYPE_INJECT_SCROLL_EVENT:
+                    markInteraction();
                     if (supportsInputEvents) {
                         injectScroll(msg.getPosition(), msg.getHScroll(), msg.getVScroll(), msg.getButtons());
                     }
                     return true;
                 case ControlMessage.TYPE_BACK_OR_SCREEN_ON:
+                    markInteraction();
                     if (supportsInputEvents) {
                         pressBackOrTurnScreenOn(msg.getAction());
                     }
                     return true;
                 case ControlMessage.TYPE_EXPAND_NOTIFICATION_PANEL:
+                    markInteraction();
                     Device.expandNotificationPanel();
                     return true;
                 case ControlMessage.TYPE_EXPAND_SETTINGS_PANEL:
+                    markInteraction();
                     Device.expandSettingsPanel();
                     return true;
                 case ControlMessage.TYPE_COLLAPSE_PANELS:
+                    markInteraction();
                     Device.collapsePanels();
                     return true;
                 case ControlMessage.TYPE_GET_CLIPBOARD:
@@ -426,6 +449,7 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
                     getUhidManager().open(msg.getId(), msg.getVendorId(), msg.getProductId(), msg.getText(), msg.getData());
                     return true;
                 case ControlMessage.TYPE_UHID_INPUT:
+                    markInteraction();
                     getUhidManager().writeInput(msg.getId(), msg.getData());
                     return true;
                 case ControlMessage.TYPE_UHID_DESTROY:
