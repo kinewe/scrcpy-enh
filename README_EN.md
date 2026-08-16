@@ -41,7 +41,7 @@ Connect the PC and device with a USB cable, then run **`投屏启动.bat`**:
 Type directly into the mirror window with your PC keyboard — no extra setup.
 
 <img src="images/typing-1.jpeg" alt="Typing 1" width="360">
-<img src="images/typing-2.jpeg" alt="Typing 2" width="360">
+![Typing 2](images/typing-2.jpeg)
 
 > Note: **Android 13+** required for UHID keyboard; older versions cannot type directly.
 

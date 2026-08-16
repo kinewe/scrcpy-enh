@@ -42,7 +42,7 @@
 
 <img src="images/typing-1.jpeg" alt="打字友好 1" width="360">
 
-<img src="images/typing-2.jpeg" alt="打字友好 2" width="360">
+![打字友好 2](images/typing-2.jpeg)
 
 > 注：至少为 **Android 13+** 支持 UHID 键盘，低于该版本将无法直接输入。
 
