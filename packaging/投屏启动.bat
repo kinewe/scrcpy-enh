@@ -53,6 +53,7 @@ echo [1] 重置 adb 服务...
 if errorlevel 1 (
     echo [失败] adb 启动失败，请确认 adb 可用
     pause
+    call :adb_cleanup
     exit /b 1
 )
 
@@ -167,7 +168,10 @@ if not defined WIRE_DEV (
     echo     3. 如果从未配对过，请选择 [2] 运行配对向导
     echo.
     choice /c 123 /n /m "请选择 [1]重新检测 [2]配对向导 [3]退出："
-    if errorlevel 3 exit /b 1
+    if errorlevel 3 (
+        call :adb_cleanup
+        exit /b 1
+    )
     if errorlevel 2 goto :pair_wizard
     goto :main
 )
@@ -279,6 +283,7 @@ if "!CAST_RC!"=="0" (
         goto :main
     )
     echo [提示] 已检测到窗口关闭（退出码 0），投屏已结束，退出投屏循环
+    call :adb_cleanup
     timeout /t 1 /nobreak >nul
     exit /b 0
 )
@@ -304,6 +309,7 @@ if not errorlevel 1 (
     if not defined STILL_THERE (
         if not defined USB_BACK (
             echo [提示] 无线设备 !PICK! 已离线，投屏连接已断开，退出投屏循环
+            call :adb_cleanup
             timeout /t 1 /nobreak >nul
             exit /b 0
         )
@@ -326,7 +332,10 @@ echo ============================================
 echo   投屏已结束，请选择：
 echo ============================================
 choice /c 123 /n /m "[1] 重新投屏 [2] 配对向导 [3] 退出："
-if errorlevel 3 exit /b 0
+if errorlevel 3 (
+    call :adb_cleanup
+    exit /b 0
+)
 if errorlevel 2 goto :pair_wizard
 goto :main
 
@@ -529,4 +538,11 @@ rem   排除自身 PID，避免误杀其他 powershell）
 rem ============================================
 :stop_usb_watch
 powershell -NoProfile -Command "Get-WmiObject Win32_Process | Where-Object { $_.CommandLine -match '!WATCH_TAG!' -and $_.ProcessId -ne $PID } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }" >nul 2>&1
+exit /b
+
+rem ============================================
+rem   退出前清理 adb server（确保后台干净）
+rem ============================================
+:adb_cleanup
+"!ADB!" kill-server >nul 2>&1
 exit /b
