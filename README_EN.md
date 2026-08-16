@@ -43,8 +43,6 @@ Type directly into the mirror window with your PC keyboard — no extra setup.
 ![Typing 1](images/typing-1.jpeg)
 ![Typing 2](images/typing-2.jpeg)
 
-![Typing 2](images/typing-2.jpeg)
-
 > Note: **Android 13+** required for UHID keyboard; older versions cannot type directly.
 
 ### 🖼️ Image Clipboard
