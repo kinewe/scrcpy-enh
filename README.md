@@ -41,7 +41,6 @@
 无需额外设置，即可直接在投屏窗口利用电脑键盘输入。
 
 ![打字友好 1](images/typing-1.jpeg)
-![打字友好 2](images/typing-2.jpeg)
 
 ![打字友好 2](images/typing-2.jpeg)
 
