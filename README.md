@@ -50,7 +50,7 @@
 
 吸取了 scrcpy PR #6676 功能——不止是文本，电脑端到移动端复制的**各类图片**也能进入移动端设备剪贴板。
 
-<img src="images/clipboard-1.jpeg" alt="图片剪贴板" width="900">
+<img src="images/clipboard-1.jpeg" alt="图片剪贴板" width="1100">
 
 在支持剪贴板发送图片的应用里可以**粘贴与发送**（输入栏长按并选粘贴 / Ctrl+V），例如微信：
 
