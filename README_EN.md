@@ -17,7 +17,7 @@
 
 Enter **Developer Mode** on your phone/tablet, enable **USB Debugging**, and allow simulating click actions via USB debugging (e.g. Xiaomi devices also need **USB debugging (Security settings)**).
 
-<img src="images/setup-permissions.jpeg" alt="Enable permissions" width="600">
+<p align="center"><img src="images/setup-permissions.jpeg" alt="Enable permissions" width="600"></p>
 
 **Step 2: Connect**
 
@@ -40,8 +40,8 @@ Connect the PC and device with a USB cable, then run **`投屏启动.bat`**:
 
 Type directly into the mirror window with your PC keyboard — no extra setup.
 
-<img src="images/typing-1.jpeg" alt="Typing 1" width="360">
-![Typing 2](images/typing-2.jpeg)
+<p align="center"><img src="images/typing-1.jpeg" alt="Typing 1" width="360"></p>
+<p align="center">![Typing 2](images/typing-2.jpeg)</p>
 
 > Note: **Android 13+** required for UHID keyboard; older versions cannot type directly.
 
@@ -49,15 +49,15 @@ Type directly into the mirror window with your PC keyboard — no extra setup.
 
 Adopts scrcpy PR #6676 — not just text: **images** copied on the PC also enter the device clipboard.
 
-<img src="images/clipboard-1.jpeg" alt="Image clipboard" width="700">
+<p align="center"><img src="images/clipboard-1.jpeg" alt="Image clipboard" width="700"></p>
 
 In apps that support clipboard images, you can **paste and send** (long-press the input field and select Paste / Ctrl+V), e.g. WeChat:
 
-<img src="images/clipboard-wechat.jpeg" alt="WeChat paste example" width="600">
+<p align="center"><img src="images/clipboard-wechat.jpeg" alt="WeChat paste example" width="600"></p>
 
 > Note: Apps may recompress/reformat clipboard images — direct paste may be blurry (GIFs become static). Press **Ctrl+G** to save the image to the device gallery, then send the original from there. (Gallery save works on Android 7.0+, but the clipboard may not show the image.)
 
-<img src="images/clipboard-gallery.jpeg" alt="Gallery example" width="700">
+<p align="center"><img src="images/clipboard-gallery.jpeg" alt="Gallery example" width="700"></p>
 
 ### 🎯 Responsive Picture
 
