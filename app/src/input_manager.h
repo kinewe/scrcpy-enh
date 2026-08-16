@@ -26,6 +26,10 @@ struct sc_input_manager {
 
     bool camera;
 
+    // True when the device screen has been turned off by a client shortcut.
+    // Tracked so that every exit path can request to turn it back on.
+    bool screen_off;
+
     struct sc_mouse_bindings mouse_bindings;
     bool legacy_paste;
     bool clipboard_autosync;
@@ -76,6 +80,14 @@ sc_input_manager_init(struct sc_input_manager *im,
 void
 sc_input_manager_handle_event(struct sc_input_manager *im,
                               const SDL_Event *event);
+
+// Return true when the device screen is currently turned off by a shortcut
+bool
+sc_input_manager_is_screen_off(const struct sc_input_manager *im);
+
+// Request to turn the device screen back on (no-op when it is already on)
+void
+sc_input_manager_turn_screen_on(struct sc_input_manager *im);
 
 // Send image clipboard from computer to device
 bool

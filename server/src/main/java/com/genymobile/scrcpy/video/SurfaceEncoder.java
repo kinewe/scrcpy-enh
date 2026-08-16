@@ -58,6 +58,13 @@ public class SurfaceEncoder implements AsyncProcessor {
     private static final long ABR_MIN_UP_INTERVAL_FAST_NS = 100_000_000L; // 0.1s at low rates (<16M): blur->watchable fast (2nd speedup: the initial interval was still too slow)
     private static final int ABR_FAST_UP_THRESHOLD = 16_000_000; // below this bitrate, use the fast up interval
     private static final long ABR_BITRATE_RESTORE_NS = 1_000_000_000L; // fps=120 must stay stable 1s before the bitrate restore may start (keeps the image from staying blurry too long after fps recovery)
+    // Early low-bitrate restore while fps is still recovering: a static
+    // screen at the 1M floor stays blurry for several seconds because the
+    // bitrate path is gated behind full fps + 1s stable. When the current
+    // fps level is already stable and the delay is healthy, allow the
+    // bitrate to climb only up to this ceiling (escape the blur floor);
+    // above it the normal full-fps restore owns the climb.
+    private static final int ABR_EARLY_BITRATE_RESTORE_MAX = 8_000_000; // early restore stops at 8M
     // Ceiling release: after this long without overload while capped, the
     // recovery ceiling is doubled (up to the initial rate) so the ceiling
     // tracks the raise cadence instead of blocking the recovery forever.
@@ -103,6 +110,51 @@ public class SurfaceEncoder implements AsyncProcessor {
     // larger share of the average). Lowering it further would risk false
     // downgrades on ordinary scrolling jitter.
     private static final long ABR_DELAY_RECOVER_MS = 20; // window avg delay delta below this -> healthy
+    // Negative-delay re-zero: the first-10-frames calibration can be polluted
+    // by the cold-start backlog, so steady-state delayDelta reads negative
+    // (faster than baseline). Negative values are clamped to 0 for all ABR
+    // thresholds/logs so they never cancel positive evidence; sustained
+    // negative evidence (10 frames, average >=10ms below baseline) then pulls
+    // the baseline down in bounded 20ms steps until it sits at the real
+    // low-latency floor. One-off jitter cannot move it.
+    private static final int ABR_DELAY_REZERO_FRAMES = 10; // negative frames per evidence batch
+    private static final long ABR_DELAY_REZERO_MIN_STEP_MS = 10; // ignore negative noise below this
+    private static final long ABR_DELAY_REZERO_STEP_MS = 20; // max baseline correction per batch
+    private static final long ABR_DELAY_REZERO_LOG_NS = 2_000_000_000L; // rate-limit the re-zero log (2s)
+    // Persistent mild overload at an already-low bitrate: some high-refresh
+    // tablets (e.g. Xiaomi Pad 8 Pro) never produce >=90ms delay spikes,
+    // only a sustained 30-60ms stream. The bitrate-only path pushes the rate
+    // to the floor and the fps buffer loop (120->90->120) cannot escape.
+    // When the bitrate is already low (<=5M and below the configured rate,
+    // or at the 1M floor) and the window below collects several mild
+    // overload evidence events, the remaining overload is dominated by
+    // per-frame encode (ME) cost, not data volume: force the fast fps
+    // degrade (120->60 / 90->60) instead of waiting for a 90ms spike.
+    private static final int ABR_MILD_FPS_BITRATE_THRESHOLD = 5_000_000; // <=5M: the bitrate buffer is exhausted
+    private static final long ABR_MILD_FPS_EVENT_INTERVAL_NS = 100_000_000L; // one evidence event per 100ms (bursts must not count as persistent)
+    private static final long ABR_MILD_FPS_WINDOW_NS = 1_000_000_000L; // evidence expires after 1s
+    private static final int ABR_MILD_FPS_EVENTS = 3; // 3 evidence events inside the window => persistent
+    // Repeated fps-buffer cycles at high bitrate: the complex-frame lookahead
+    // keeps pushing 120->90 while the encoder itself is fast (negative
+    // delayDelta), so the delay-based paths never see an overload. If the
+    // 120->90 buffer drop repeats inside a short window, the 90 level is not
+    // enough: force the fast fps degrade 120->60 instead of looping 90->120.
+    // 2 drops inside 5s: tablets show repeated app-open animations as
+    // 30-60ms mild overloads; waiting for a third cycle was too slow, the
+    // 90->120 restore finished before the next drop could act.
+    private static final long ABR_FPS_BUFFER_REPEAT_WINDOW_NS = 5_000_000_000L; // 5s: catch the ~1.5-2s restore cycles
+    private static final int ABR_FPS_BUFFER_REPEAT_COUNT = 2; // 2 buffer drops inside the window => structural
+    // Single-animation burst: a real-world app-open stutter is ONE animation,
+    // not repeated 120->90 cycles. Count any two load evidence events inside
+    // 1.5s while still at full fps (a 120->90 buffer drop, an instant 30-90ms
+    // overload, or a 30-90ms window overload). Two events inside the window
+    // mean this animation is structurally overloaded: force 120->60 and hold
+    // 60 for at least 2s so the animation finishes before any restore probe.
+    // Occasional single spikes never reach two events -> no over-trigger.
+    private static final long ABR_FULL_FPS_BURST_WINDOW_NS = 1_500_000_000L; // 1.5s burst window
+    private static final long ABR_FULL_FPS_BURST_EVENT_INTERVAL_NS = 100_000_000L; // one evidence event per 100ms (same frame must not count twice)
+    private static final int ABR_FULL_FPS_BURST_EVENTS = 2; // 2 events inside the window => structural
+    private static final long ABR_FULL_FPS_BURST_DWELL_NS = 2_000_000_000L; // hold the degraded level for the animation duration
 
     private int currentBitRate;
     // Recovery ceiling (TCP-like congestion control): the restore phase must
@@ -126,6 +178,9 @@ public class SurfaceEncoder implements AsyncProcessor {
     private long abrBaselineDelayMs;
     private long abrWindowDelaySum;
     private int abrWindowDelayCount;
+    private long abrNegDelaySum; // accumulated negative delayDelta for the current re-zero batch
+    private int abrNegDelayCount; // negative frames collected in the current re-zero batch
+    private long abrRezeroLogNs; // rate-limit the baseline re-zero log
     private boolean abrRestoring; // bitrate is climbing after a raise; the next overload must degrade immediately
     private boolean abrStateInitialized; // ABR state kept across encoder rebuilds
     // Pulse detection for absolute-latency measurement: frames whose PTS
@@ -158,6 +213,14 @@ public class SurfaceEncoder implements AsyncProcessor {
     private long lastDelayDeltaMs; // previous frame delayDelta (trend comparison)
     private int trendStreak; // consecutive rising frames
     private long abrTrendLogNs; // rate-limit the trend log (1/s)
+    private long abrMildOverloadFirstNs; // first evidence event of the current persistent-mild-overload window
+    private int abrMildOverloadCount; // evidence events collected inside the window
+    private long abrMildOverloadLastEventNs; // event debounce (one evidence event per 100ms)
+    private long abrFpsBufferDropFirstNs; // first 120->90 buffer drop of the current repeat window
+    private int abrFpsBufferDropCount; // 120->90 buffer drops collected inside the window
+    private long abrFullFpsBurstFirstNs; // first load evidence of the current single-animation burst window
+    private int abrFullFpsBurstCount; // load evidence events collected inside the burst window
+    private long abrFullFpsBurstLastEventNs; // burst event debounce (one evidence per 100ms)
     private long brOverloadFirstNs; // first overload of the current restore-phase window
     private int brOverloadCount; // overloads counted inside the restore-phase window
     private long abrFpsFloorLogNs; // rate-limit the "fps already at floor" log
@@ -185,6 +248,11 @@ public class SurfaceEncoder implements AsyncProcessor {
     private final boolean downsizeOnError;
     private final int minSizeAlignment;
     private final boolean ignoreVideoEncoderConstraints;
+    // Old devices (Android < 10) have high encoder/capture delay jitter: the
+    // ABR would mistake it for permanent overload and oscillate between 1M
+    // and the configured bitrate, freezing the picture. Keep the configured
+    // bitrate/fps untouched on these devices.
+    private final boolean legacyDevice;
 
     private boolean firstFrameSent;
     private int consecutiveErrors;
@@ -213,6 +281,10 @@ public class SurfaceEncoder implements AsyncProcessor {
         this.downsizeOnError = options.getDownsizeOnError();
         this.minSizeAlignment = options.getMinSizeAlignment();
         this.ignoreVideoEncoderConstraints = options.getIgnoreVideoEncoderConstraints();
+        this.legacyDevice = Build.VERSION.SDK_INT < Build.VERSION_CODES.Q;
+        if (legacyDevice) {
+            Ln.i("Video ABR disabled for legacy device (SDK=" + Build.VERSION.SDK_INT + ")");
+        }
     }
 
     private void streamCapture() throws IOException, ConfigurationException {
@@ -439,6 +511,21 @@ public class SurfaceEncoder implements AsyncProcessor {
         abrBaselineDelayMs = 0;
         abrWindowDelaySum = 0;
         abrWindowDelayCount = 0;
+        // Negative-delay evidence is per session too: a rebuild drains the
+        // queue and the next calibration starts from a fresh baseline.
+        abrNegDelaySum = 0;
+        abrNegDelayCount = 0;
+        abrRezeroLogNs = 0;
+        // The mild-overload evidence window is per encoder session too:
+        // a rebuild drains the queue, so old evidence must not carry over.
+        abrMildOverloadFirstNs = 0;
+        abrMildOverloadCount = 0;
+        abrMildOverloadLastEventNs = 0;
+        abrFpsBufferDropFirstNs = 0;
+        abrFpsBufferDropCount = 0;
+        abrFullFpsBurstFirstNs = 0;
+        abrFullFpsBurstCount = 0;
+        abrFullFpsBurstLastEventNs = 0;
         // The fps LEVEL and its probe/watch state are kept across rebuilds
         // (an fps change does not rebuild the encoder by itself: the level
         // is applied via GL-layer thinning, and the encoder's configure-time
@@ -467,31 +554,33 @@ public class SurfaceEncoder implements AsyncProcessor {
                         // fires. Budget uses the current frame rate estimated
                         // from the frame gap (normal 8-17ms; a gap >500ms is a
                         // dropped frame, not a normal frame interval).
-                        long gapUs = ptsUs - pulseLastPtsUs;
-                        if (gapUs > 0 && gapUs < 500_000) {
-                            long fps = 1_000_000 / gapUs;
-                            if (fps > 0) {
-                                long budgetBytes = currentBitRate / fps / 8;
-                                if (budgetBytes > 0
-                                        && !isKeyFrame // I frames are large by nature; never trigger complex
-                                        && bufferInfo.size > budgetBytes * ABR_COMPLEXITY_FACTOR / 2
-                                        && nowNs - abrLastDownNs >= ABR_INSTANT_INTERVAL_NS) {
-                                    // Complex is a CONTENT signal, not an overload signal:
-                                    // it must NOT clear the bitrate-restore stable timer or
-                                    // the restoring flag. At the 1M floor a 5KB video frame
-                                    // trips complex on every frame (budget ~2KB) — clearing
-                                    // the timer there starved the restore forever and locked
-                                    // the bitrate at 1M during video playback (the bitrate
-                                    // never rises while watching video). The complex degrade
-                                    // below (gentle x0.7 while restoring) still applies, and
-                                    // the restore raises the rate until the budget grows and
-                                    // complex stops firing on its own.
-                                    if (nowNs - abrLastComplexLogNs >= 1_000_000_000L) {
-                                        Ln.i("ABR: complex frame (bytes="
-                                                + (bufferInfo.size / 1024) + "KB > budget x1.5), degrading");
-                                        abrLastComplexLogNs = nowNs;
+                        if (!legacyDevice) {
+                            long gapUs = ptsUs - pulseLastPtsUs;
+                            if (gapUs > 0 && gapUs < 500_000) {
+                                long fps = 1_000_000 / gapUs;
+                                if (fps > 0) {
+                                    long budgetBytes = currentBitRate / fps / 8;
+                                    if (budgetBytes > 0
+                                            && !isKeyFrame // I frames are large by nature; never trigger complex
+                                            && bufferInfo.size > budgetBytes * ABR_COMPLEXITY_FACTOR / 2
+                                            && nowNs - abrLastDownNs >= ABR_INSTANT_INTERVAL_NS) {
+                                        // Complex is a CONTENT signal, not an overload signal:
+                                        // it must NOT clear the bitrate-restore stable timer or
+                                        // the restoring flag. At the 1M floor a 5KB video frame
+                                        // trips complex on every frame (budget ~2KB) — clearing
+                                        // the timer there starved the restore forever and locked
+                                        // the bitrate at 1M during video playback (the bitrate
+                                        // never rises while watching video). The complex degrade
+                                        // below (gentle x0.7 while restoring) still applies, and
+                                        // the restore raises the rate until the budget grows and
+                                        // complex stops firing on its own.
+                                        if (nowNs - abrLastComplexLogNs >= 1_000_000_000L) {
+                                            Ln.i("ABR: complex frame (bytes="
+                                                    + (bufferInfo.size / 1024) + "KB > budget x1.5), degrading");
+                                            abrLastComplexLogNs = nowNs;
+                                        }
+                                        onOverload(codec, nowNs, false, false, -1); // complex: probe-insensitive, never counts restore-overloads (gentle x0.7 via field abrRestoring)
                                     }
-                                    onOverload(codec, nowNs, false, false, -1); // complex: probe-insensitive, never counts restore-overloads (gentle x0.7 via field abrRestoring)
                                 }
                             }
                         }
@@ -515,8 +604,10 @@ public class SurfaceEncoder implements AsyncProcessor {
                         // suspect for the splash first-frame latency: a large
                         // 2K I frame may take 200-500ms to encode).
                         boolean isKey = (bufferInfo.flags & MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0;
+                        // Negative delayDelta means "faster than the startup
+                        // baseline", not an overload: clamp to 0 for diagnosis.
                         long fdelay = abrBaselineDelayMs > 0
-                                ? (nowNs - ptsUs * 1000) / 1_000_000 - abrBaselineDelayMs : -1;
+                                ? Math.max(0, (nowNs - ptsUs * 1000) / 1_000_000 - abrBaselineDelayMs) : -1;
                         if (isKey || (fdelay > 100 && nowNs - frameLogLastNs >= 500_000_000L)
                                 || nowNs - frameLogLastNs >= 500_000_000L) {
                             Ln.i("FRAME: type=" + (isKey ? "I" : "P") + " pts=" + ptsUs
@@ -556,6 +647,10 @@ public class SurfaceEncoder implements AsyncProcessor {
      * the bitrate is raised back step by step.
      */
     private void maybeAdaptBitrate(MediaCodec codec, long ptsUs, long nowNs, boolean isKeyFrame) {
+        if (legacyDevice) {
+            // Legacy compatibility: no dynamic bitrate/fps adjustment.
+            return;
+        }
         // Delay calibration: the first frames measure the baseline encoder
         // delay (ptsUs and elapsedRealtime use different monotonic bases).
         long delayMs = (nowNs - ptsUs * 1000) / 1_000_000;
@@ -577,7 +672,37 @@ public class SurfaceEncoder implements AsyncProcessor {
             }
             return;
         }
-        long delayDelta = delayMs - abrBaselineDelayMs;
+        long rawDelayDelta = delayMs - abrBaselineDelayMs;
+        // Negative-delay re-zero: negative means the current pipeline is
+        // FASTER than the startup-calibrated baseline (the first frames were
+        // measured with a cold encoder queue). It must never cancel positive
+        // evidence in the window average, so it is clamped to 0 below. If
+        // negative deltas persist, the baseline was polluted by the startup
+        // backlog: pull it down in bounded steps toward the real low-latency
+        // floor, which restores the delay-trigger sensitivity.
+        if (rawDelayDelta < 0) {
+            abrNegDelaySum += rawDelayDelta;
+            abrNegDelayCount++;
+            if (abrNegDelayCount >= ABR_DELAY_REZERO_FRAMES) {
+                long correction = -abrNegDelaySum / abrNegDelayCount;
+                abrNegDelaySum = 0;
+                abrNegDelayCount = 0;
+                if (correction >= ABR_DELAY_REZERO_MIN_STEP_MS) {
+                    correction = Math.min(correction, ABR_DELAY_REZERO_STEP_MS);
+                    long newBaseline = Math.max(0, abrBaselineDelayMs - correction);
+                    if (nowNs - abrRezeroLogNs >= ABR_DELAY_REZERO_LOG_NS) {
+                        Ln.i("ABR: baseline re-zero " + abrBaselineDelayMs + "->" + newBaseline
+                                + " (negative delay evidence, correction=" + correction + "ms)");
+                        abrRezeroLogNs = nowNs;
+                    }
+                    abrBaselineDelayMs = newBaseline;
+                }
+            }
+        } else {
+            abrNegDelaySum = 0;
+            abrNegDelayCount = 0;
+        }
+        long delayDelta = Math.max(0, rawDelayDelta);
         // Delay-trend lookahead (GCC trendline idea): a delayDelta that keeps
         // rising means the encoder queue is STARTING to build — act before the
         // absolute threshold (25ms) is ever reached. 3 consecutive rising
@@ -637,6 +762,24 @@ public class SurfaceEncoder implements AsyncProcessor {
                     Ln.i("ABR: instant overload (delayDelta=" + delayDelta + "ms), degrading");
                     abrInstantLogNs = nowNs;
                 }
+                // Persistent mild overload at low bitrate: tablets with
+                // "gentle" sustained overloads never reach the 90ms fast
+                // path. When the evidence window is full, force the fps
+                // step now, BEFORE the bitrate path touches the 90 buffer
+                // level (so 120 goes directly to 60 via the fast path).
+                if (notePersistentMildOverload(codec, nowNs, delayDelta)) {
+                    return;
+                }
+                // Single-animation burst at full fps: count this instant
+                // overload as one evidence event even when the bitrate is
+                // still high. Real overloads (>=90ms) stay on the existing
+                // fast path and do not participate in the burst.
+                if (delayDelta >= ABR_DELAY_TRIGGER_MS && delayDelta < ABR_FPS_OVERLOAD_MS) {
+                    if (noteFullFpsOverloadBurst(codec, nowNs)) {
+                        onOverload(codec, nowNs, !isKeyFrame, wasRestoring, delayDelta);
+                        return;
+                    }
+                }
                 // An I-frame spike is momentary (its encode cost is one frame);
                 // during a probe watch window it must not abort the probe.
                 onOverload(codec, nowNs, !isKeyFrame, wasRestoring, delayDelta);
@@ -683,6 +826,18 @@ public class SurfaceEncoder implements AsyncProcessor {
             // away instead of staying high while the page keeps stuttering.
             boolean restoring = abrRestoring;
             abrRestoring = false;
+            // A window-average in the 30-90ms band is evidence too: the
+            // tablet failure mode is a sustained mild average, not a single
+            // >=90ms spike. If this completes the evidence window, the fps
+            // drop is forced and the bitrate path is skipped for this window.
+            if (notePersistentMildOverload(codec, nowNs, delayAvg)) {
+                return;
+            }
+            // Count this window overload as burst evidence too (mild band
+            // only: real >=90ms overloads keep their existing semantics).
+            if (delayAvg < ABR_FPS_OVERLOAD_MS) {
+                noteFullFpsOverloadBurst(codec, nowNs);
+            }
             if (restoring || nowNs - abrLastDownNs >= ABR_MIN_DOWN_INTERVAL_NS) {
                 if (nowNs - abrWindowLogNs >= 1_000_000_000L) {
                     Ln.i("ABR: overloaded"
@@ -727,6 +882,22 @@ public class SurfaceEncoder implements AsyncProcessor {
         if (abrFps < fpsRestoreCeiling()) {
             if (nowNs < fpsRevertUntilNs || nowNs < fpsRestoreBlockedUntilNs) {
                 return;
+            }
+            // Early low-bitrate restore: the fps climb can take seconds
+            // (probe watch + backoff), but a static healthy screen must not
+            // stay at 1M for that long. Raise the bitrate below the 8M
+            // ceiling while the current fps level is stable and the delay is
+            // healthy; the fps probe runs in a later window.
+            if (nowNs - fpsStableSinceNs >= ABR_FPS_STABLE_PROBE_NS
+                    && currentBitRate < ABR_EARLY_BITRATE_RESTORE_MAX
+                    && currentBitRate < videoBitRate
+                    && delayAvg < ABR_DELAY_RECOVER_MS
+                    && nowNs - abrLastUpNs >= (currentBitRate < ABR_FAST_UP_THRESHOLD
+                            ? ABR_MIN_UP_INTERVAL_FAST_NS : ABR_MIN_UP_INTERVAL_NS)) {
+                Ln.i("ABR: early bitrate restore below full fps (fps=" + abrFps
+                        + " stable, delayDelta=" + delayAvg + "ms)");
+                raiseBitrate(codec, nowNs);
+                return; // let the bitrate step settle before the next fps probe
             }
             if (nowNs - fpsStableSinceNs >= ABR_FPS_STABLE_PROBE_NS) {
                 probeFpsUp(codec, nowNs);
@@ -885,24 +1056,200 @@ public class SurfaceEncoder implements AsyncProcessor {
             // stream responsive: only bitrate callbacks were seen, no 90
             // step). No-op when fps is already below 120.
             if (abrFps == ABR_FPS_LEVELS[0]) {
-                Ln.i("ABR: fps buffer 120->90 (shares bitrate load)");
-                capture.setTargetFps(90);
-                abrFps = 90;
-                fpsStableSinceNs = 0;
-                fpsProbeUntilNs = 0;
-                fpsProbeFrom = 0;
-                fpsDropCooldownUntilNs = nowNs + 300_000_000L;
-                abrLastDownNs = nowNs;
+                if (noteFullFpsOverloadBurst(codec, nowNs)) {
+                    // This 120->90 buffer drop completed a single-animation
+                    // burst: the fast path already took 120->60. Skip the 90
+                    // partner level; the bitrate buffer below still runs.
+                } else if (noteRepeatedFpsBufferDrop(codec, nowNs)) {
+                    // Repeated 120->90 cycles: 90 is not enough. The fast
+                    // path already took 120->60; the bitrate buffer below
+                    // still runs so the ceiling drops with the fps level.
+                } else {
+                    Ln.i("ABR: fps buffer 120->90 (shares bitrate load)");
+                    capture.setTargetFps(90);
+                    abrFps = 90;
+                    fpsStableSinceNs = 0;
+                    fpsProbeUntilNs = 0;
+                    fpsProbeFrom = 0;
+                    abrMildOverloadFirstNs = 0; // 90 gets a fresh mild-evidence window
+                    abrMildOverloadCount = 0;
+                    fpsDropCooldownUntilNs = nowNs + 300_000_000L;
+                    abrLastDownNs = nowNs;
+                }
             }
             lowerBitrate(codec, nowNs, gentle);
             return;
         }
     }
 
+    /**
+     * Single-animation burst at full fps: a real app-open stutter is one
+     * animation, not repeated 120->90 cycles. Count any two load evidence
+     * events inside 1.5s while still at 120 (a 120->90 buffer drop, an
+     * instant 30-90ms overload, or a 30-90ms window overload). Two events
+     * mean this animation is structurally overloaded: force 120->60 and
+     * hold the degraded level for at least 2s so the animation finishes
+     * before any restore probe. A lone spike never reaches two events.
+     */
+    private boolean noteFullFpsOverloadBurst(MediaCodec codec, long nowNs) {
+        if (abrFps != ABR_FPS_LEVELS[0]) {
+            abrFullFpsBurstFirstNs = 0;
+            abrFullFpsBurstCount = 0;
+            return false;
+        }
+        if (nowNs - abrFullFpsBurstLastEventNs < ABR_FULL_FPS_BURST_EVENT_INTERVAL_NS) {
+            return false;
+        }
+        if (abrFullFpsBurstFirstNs == 0
+                || nowNs - abrFullFpsBurstFirstNs > ABR_FULL_FPS_BURST_WINDOW_NS) {
+            abrFullFpsBurstFirstNs = nowNs;
+            abrFullFpsBurstCount = 1;
+            abrFullFpsBurstLastEventNs = nowNs;
+            return false;
+        }
+        abrFullFpsBurstCount++;
+        abrFullFpsBurstLastEventNs = nowNs;
+        if (abrFullFpsBurstCount < ABR_FULL_FPS_BURST_EVENTS) {
+            return false;
+        }
+        abrFullFpsBurstFirstNs = 0;
+        abrFullFpsBurstCount = 0;
+        if (nowNs < fpsDropCooldownUntilNs) {
+            // Pre-drop queue frames are still draining; start fresh after
+            // the drain grace.
+            return false;
+        }
+        Ln.i("ABR: full-fps overload burst (" + ABR_FULL_FPS_BURST_EVENTS
+                + " events in " + (ABR_FULL_FPS_BURST_WINDOW_NS / 1_000_000L)
+                + "ms), forcing fast fps degrade");
+        lowerFps(codec, nowNs);
+        // Hold 60 through the animation: block the restore probe for at
+        // least the burst dwell even if the exponential backoff is shorter.
+        fpsRestoreBlockedUntilNs = Math.max(fpsRestoreBlockedUntilNs,
+                nowNs + ABR_FULL_FPS_BURST_DWELL_NS);
+        return true;
+    }
+
+    /**
+     * Repeated 120->90 buffer drops inside a short window: the bitrate
+     * buffer keeps engaging while the delay paths see nothing (e.g. complex
+     * frames at full bitrate with negative delayDelta). The 90 partner level
+     * is not enough, so force the fast fps degrade 120->60. This also keeps
+     * the bitrate restore gated behind a full-fps stable period, so the rate
+     * stops oscillating back to the configured maximum.
+     */
+    private boolean noteRepeatedFpsBufferDrop(MediaCodec codec, long nowNs) {
+        if (abrFpsBufferDropFirstNs == 0
+                || nowNs - abrFpsBufferDropFirstNs > ABR_FPS_BUFFER_REPEAT_WINDOW_NS) {
+            abrFpsBufferDropFirstNs = nowNs;
+            abrFpsBufferDropCount = 1;
+            return false;
+        }
+        abrFpsBufferDropCount++;
+        if (abrFpsBufferDropCount < ABR_FPS_BUFFER_REPEAT_COUNT) {
+            return false;
+        }
+        abrFpsBufferDropFirstNs = 0;
+        abrFpsBufferDropCount = 0;
+        if (nowNs < fpsDropCooldownUntilNs) {
+            // Old frames are still draining from a previous fps change; let
+            // the next window start fresh after the drain grace.
+            return false;
+        }
+        Ln.i("ABR: repeated fps buffer cycles 120->90 (count="
+                + ABR_FPS_BUFFER_REPEAT_COUNT + "), forcing fast fps degrade");
+        lowerFps(codec, nowNs);
+        return true;
+    }
+
+    /**
+     * Persistent mild overload at an already-low bitrate: count 30-90ms
+     * evidence events (instant frames or window averages) inside a 1s
+     * window. Once the evidence repeats, the remaining overload is encode
+     * (ME) cost rather than bitrate cost, so force the fast fps degrade.
+     * This is the tablet "gentle sustained overload" path that never reaches
+     * the >=90ms fast-degrade trigger.
+     */
+    private boolean notePersistentMildOverload(MediaCodec codec, long nowNs, long delayDelta) {
+        // Only engage once ABR has already pushed the rate low (<=5M below
+        // the configured target) or the rate is at the absolute floor.
+        if (!isMildFpsCandidate()) {
+            abrMildOverloadFirstNs = 0;
+            abrMildOverloadCount = 0;
+            return false;
+        }
+        // Real overloads (>=90ms) are owned by the existing fast path: clear
+        // the mild evidence so a single big frame cannot complete the count.
+        if (delayDelta >= ABR_FPS_OVERLOAD_MS) {
+            abrMildOverloadFirstNs = 0;
+            abrMildOverloadCount = 0;
+            return false;
+        }
+        if (delayDelta < ABR_DELAY_TRIGGER_MS) {
+            return false;
+        }
+        // One evidence event per 100ms: a burst of 3 consecutive slow frames
+        // must not count as persistent overload.
+        if (nowNs - abrMildOverloadLastEventNs < ABR_MILD_FPS_EVENT_INTERVAL_NS) {
+            return false;
+        }
+        if (abrMildOverloadFirstNs == 0 || nowNs - abrMildOverloadFirstNs > ABR_MILD_FPS_WINDOW_NS) {
+            abrMildOverloadFirstNs = nowNs;
+            abrMildOverloadCount = 1;
+            abrMildOverloadLastEventNs = nowNs;
+            return false;
+        }
+        abrMildOverloadCount++;
+        abrMildOverloadLastEventNs = nowNs;
+        if (abrMildOverloadCount < ABR_MILD_FPS_EVENTS) {
+            return false;
+        }
+        // Evidence window full: force the fps step.
+        abrMildOverloadFirstNs = 0;
+        abrMildOverloadCount = 0;
+        if (abrFps == ABR_FPS_LEVELS[ABR_FPS_LEVELS.length - 1]) {
+            // Already at the fps floor: there is no lower step.
+            return false;
+        }
+        if (nowNs < fpsDropCooldownUntilNs) {
+            // Pre-drop queue frames are still draining; start a fresh
+            // evidence window after the drain grace.
+            return false;
+        }
+        if (fpsProbeUntilNs > 0) {
+            // A probed level cannot sustain the persistent mild load: revert
+            // it and let the 3s revert cooldown block another probe.
+            Ln.i("ABR: persistent mild overload during fps probe (delayDelta=" + delayDelta
+                    + "ms, bitrate=" + currentBitRate + "), forcing revert");
+            revertFps(codec, nowNs);
+        } else {
+            Ln.i("ABR: persistent mild overload at low bitrate (delayDelta=" + delayDelta
+                    + "ms, bitrate=" + currentBitRate + "), forcing fps degrade");
+            lowerFps(codec, nowNs);
+        }
+        return true;
+    }
+
+    private boolean isMildFpsCandidate() {
+        // The rate must already be reduced below the configured target and
+        // at <=5M, OR be at the absolute 1M floor (a configured floor counts
+        // too: bitrate can no longer act as the buffer).
+        return currentBitRate == ABR_MIN_BITRATE
+                || (currentBitRate < videoBitRate
+                        && currentBitRate <= ABR_MILD_FPS_BITRATE_THRESHOLD);
+    }
+
     private void lowerFps(MediaCodec codec, long nowNs) {
         brOverloadFirstNs = 0; // new fps level: fresh restore-overload window
         brOverloadCount = 0;
         fpsRecoverOverloads = 0; // new fps level: fresh overload debounce
+        abrMildOverloadFirstNs = 0; // new fps level: fresh mild-evidence window
+        abrMildOverloadCount = 0;
+        abrFpsBufferDropFirstNs = 0; // new fps level: fresh buffer-cycle window
+        abrFpsBufferDropCount = 0;
+        abrFullFpsBurstFirstNs = 0; // new fps level: fresh burst window
+        abrFullFpsBurstCount = 0;
+        abrFullFpsBurstLastEventNs = 0;
         int idx = indexOfFps(abrFps);
         if (idx < 0 || idx >= ABR_FPS_LEVELS.length - 1) {
             if (nowNs - abrFpsFloorLogNs >= 1_000_000_000L) {
@@ -955,6 +1302,11 @@ public class SurfaceEncoder implements AsyncProcessor {
         int newFps = ABR_FPS_LEVELS[idx - 1];
         fpsProbeFrom = abrFps;
         fpsRecoverOverloads = 0; // fresh probe: fresh overload debounce
+        abrMildOverloadFirstNs = 0; // fresh level: fresh mild-evidence window
+        abrMildOverloadCount = 0;
+        // NOTE: the buffer-cycle window deliberately survives the 90->120
+        // probe: repeated 120->90 buffer drops are counted across restore
+        // cycles, otherwise the counter would never reach the threshold.
         // Full level = no fps cap: pass 0 to the GL layer (render every
         // frame, no fixed-interval thinning). abrFps still records the full
         // level so effectiveMaxFps() (the encoder MediaFormat cap, still
@@ -985,6 +1337,13 @@ public class SurfaceEncoder implements AsyncProcessor {
         abrLastDownNs = nowNs;
         fpsRevertUntilNs = nowNs + ABR_FPS_REVERT_COOLDOWN_NS; // no probing for 3s
         fpsRecoverOverloads = 0; // fresh level: fresh debounce
+        abrMildOverloadFirstNs = 0; // fresh level: fresh mild-evidence window
+        abrMildOverloadCount = 0;
+        abrFpsBufferDropFirstNs = 0; // fresh level: fresh buffer-cycle window
+        abrFpsBufferDropCount = 0;
+        abrFullFpsBurstFirstNs = 0; // fresh level: fresh burst window
+        abrFullFpsBurstCount = 0;
+        abrFullFpsBurstLastEventNs = 0;
     }
 
     /**
@@ -1098,6 +1457,10 @@ public class SurfaceEncoder implements AsyncProcessor {
         abrRestoring = newRate < videoBitRate; // an overload during the climb must degrade immediately (cleared once the target is reached)
         brOverloadFirstNs = 0; // fresh restore-phase overload window (repeated-overload fps guard)
         brOverloadCount = 0;
+        abrMildOverloadFirstNs = 0; // fresh bitrate step: fresh mild-evidence window
+        abrMildOverloadCount = 0;
+        // NOTE: the buffer-cycle window deliberately survives the bitrate
+        // restore; the next 120->90 drop completes the cycle count.
     }
 
     private void applyBitrate(MediaCodec codec, int bitrate) {

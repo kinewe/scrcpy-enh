@@ -144,6 +144,7 @@ sc_input_manager_init(struct sc_input_manager *im,
     im->mp = params->mp;
     im->gp = params->gp;
     im->camera = params->camera;
+    im->screen_off = false;
 
     im->mouse_bindings = params->mouse_bindings;
     im->legacy_paste = params->legacy_paste;
@@ -1016,6 +1017,24 @@ set_display_power(struct sc_input_manager *im, bool on) {
 
     if (!sc_controller_push_msg(im->controller, &msg)) {
         LOGW("Could not request 'set screen power mode'");
+        return;
+    }
+
+    // Track the state locally so exit paths can restore the screen even if
+    // the device-side cleanup process is not running.
+    im->screen_off = !on;
+    LOGI("Device screen turned %s", on ? "on" : "off");
+}
+
+bool
+sc_input_manager_is_screen_off(const struct sc_input_manager *im) {
+    return im->screen_off;
+}
+
+void
+sc_input_manager_turn_screen_on(struct sc_input_manager *im) {
+    if (im->screen_off) {
+        set_display_power(im, true);
     }
 }
 
@@ -1270,6 +1289,18 @@ sc_input_manager_process_key(struct sc_input_manager *im,
             && !(event->mod & SDL_KMOD_ALT) && !(event->mod & SDL_KMOD_GUI)
             && sdl_keycode == SDLK_F) {
         sc_screen_toggle_fps_overlay(im->screen);
+        return;
+    }
+
+    // Ctrl+H: toggle the device screen power (screen off saves battery while
+    // mirroring). Same interception pattern as Ctrl+G/F: never forwarded to
+    // the device, works with a Chinese IME active.
+    if (down && !repeat && ctrl && !shift
+            && !(event->mod & SDL_KMOD_ALT) && !(event->mod & SDL_KMOD_GUI)
+            && sdl_keycode == SDLK_H) {
+        if (control && !im->camera && !disconnected && !paused) {
+            set_display_power(im, im->screen_off);
+        }
         return;
     }
 

@@ -113,6 +113,14 @@ sdl_configure_ctrl_c_windows(void) {
 }
 #endif // _WIN32
 
+static void
+restore_device_screen(struct scrcpy *s, bool has_screen) {
+    if (has_screen) {
+        // No-op unless the screen was turned off by Ctrl+H.
+        sc_input_manager_turn_screen_on(&s->screen.im);
+    }
+}
+
 static enum scrcpy_exit_code
 event_loop(struct scrcpy *s, bool has_screen) {
     SDL_Event event;
@@ -123,24 +131,30 @@ event_loop(struct scrcpy *s, bool has_screen) {
                 if (has_screen) {
                     sc_screen_handle_event(&s->screen, &event);
                 }
+                // The device-side cleanup process restores the screen.
                 return SCRCPY_EXIT_DISCONNECTED;
             case SC_EVENT_DEMUXER_ERROR:
                 LOGE("Demuxer error");
+                restore_device_screen(s, has_screen);
                 return SCRCPY_EXIT_FAILURE;
             case SC_EVENT_CONTROLLER_ERROR:
                 LOGE("Controller error");
                 return SCRCPY_EXIT_FAILURE;
             case SC_EVENT_RECORDER_ERROR:
                 LOGE("Recorder error");
+                restore_device_screen(s, has_screen);
                 return SCRCPY_EXIT_FAILURE;
             case SC_EVENT_AOA_OPEN_ERROR:
                 LOGE("AOA open error");
+                restore_device_screen(s, has_screen);
                 return SCRCPY_EXIT_FAILURE;
             case SC_EVENT_TIME_LIMIT_REACHED:
                 LOGI("Time limit reached");
+                restore_device_screen(s, has_screen);
                 return SCRCPY_EXIT_SUCCESS;
             case SDL_EVENT_QUIT:
                 LOGD("User requested to quit");
+                restore_device_screen(s, has_screen);
                 return SCRCPY_EXIT_SUCCESS;
             default:
                 if (has_screen) {
@@ -970,6 +984,11 @@ end:
         sc_usb_stop(&s->usb);
     }
 #endif
+    // Restore the device screen if it was turned off by Ctrl+H. The
+    // device-side cleanup process is a second safety net for abnormal exits.
+    if (screen_initialized && controller_started) {
+        sc_input_manager_turn_screen_on(&s->screen.im);
+    }
     if (controller_started) {
         sc_controller_stop(&s->controller);
     }

@@ -256,14 +256,12 @@ public final class CleanUp {
 
         // Change the power of the main display when mirroring a virtual display
         int targetDisplayId = displayId != Device.DISPLAY_ID_NONE ? displayId : 0;
-        if (Device.isScreenOn(targetDisplayId)) {
-            if (powerOffScreen) {
-                Ln.i("Power off screen");
-                Device.powerOffScreen(targetDisplayId);
-            } else if (restoreDisplayPower) {
-                Ln.i("Restoring display power");
-                Device.setDisplayPower(targetDisplayId, true);
-            }
+        if (restoreDisplayPower) {
+            Ln.i("Restoring display power");
+            Device.setDisplayPower(targetDisplayId, true);
+        } else if (Device.isScreenOn(targetDisplayId) && powerOffScreen) {
+            Ln.i("Power off screen");
+            Device.powerOffScreen(targetDisplayId);
         }
 
         System.exit(0);

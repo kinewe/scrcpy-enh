@@ -5,16 +5,26 @@ del /q "%TEMP%\scrcpy_watch_switch.flag" >nul 2>&1
 cd /d "%~dp0"
 
 rem ============================================
-rem   scrcpy 4.1 自定义构建（图片剪贴板版）启动脚本
-rem   用法: 双击运行，或 启动.bat [scrcpy参数...]
-rem   快捷键: MOD+v=同步剪贴板并粘贴; MOD+Shift+c=只同步剪贴板不粘贴（图片/文本）
-rem   剪贴板自动同步：电脑复制（文本/图片）自动推送到手机剪贴板，无需按键，
-rem   手机长按即可粘贴（--no-clipboard-sync 可关闭）
-rem   投屏循环：关闭窗口（退出码 0）正常退出；拔线/异常断开（非 0）自动重新检测并重连，
-rem   USB 优先，无 USB 则自动切换无线（adb devices 中 IP:端口 条目）
-rem   无线投屏期间开启 USB 插线监测，检测到 USB 插入自动切回有线高清投屏
-rem   串流参数与 手机投屏.bat 保持同步（有线高规格 / 无线低延迟）
-rem ============================================
+rem   scrcpy-ez 投屏启动脚本
+rem
+rem   首次连接：
+rem     1. 手机/平板开启开发者模式，打开 USB 调试
+rem        （小米设备还需打开「USB 调试（安全设置）」）
+rem     2. 用 USB 线连接电脑后双击本脚本
+rem     3. 插线 = USB 有线投屏（高规格）；拔线 = 无线投屏
+rem
+rem   后续连接：
+rem     - 相同局域网下直接双击本脚本即可无线连接上次设备
+rem     - 更换设备/网络：用 USB 线重新连接一次即可
+rem
+rem   快捷键：
+rem     Ctrl+F  投屏参数控件开关（控件可按住 Alt 拖动位置）
+rem     Ctrl+G  将电脑复制的图片保存至手机（平板）相册
+rem     Ctrl+H  投屏期间黑屏省电（再次按下恢复亮屏）
+rem     - 电脑复制文本/图片自动同步到手机剪贴板，长按粘贴即可
+rem     - 关窗断开；拔线/异常自动重连（USB 优先，无线兜底）
+rem
+
 
 rem 使用本目录内的 server（自定义构建必须，不依赖环境变量）
 set "SCRCPY_SERVER_PATH=%~dp0scrcpy-server"
@@ -31,6 +41,9 @@ set "CONFIG_FILE=%SCRIPT_DIR%config.txt"
 set "FALLBACK_CONFIG=%SCRIPT_DIR%..\..\config.txt"
 
 rem ----- 串流参数：有线 USB 带宽充足用高规格；无线带宽有限保持低延迟 -----
+rem 键盘模式默认 uhid；:detect_keyboard 会按 Android SDK 覆盖，读不到时保持 uhid
+set "KEYBOARD=uhid"
+set "LEGACY_DEVICE="
 rem 有线规格：动态分配（:detect_display_spec 读取设备分辨率/刷新率后覆盖），此值为读取失败时的保底默认
 set "USB_ARGS=--keyboard=!KEYBOARD! --video-codec=h264 --video-bit-rate=50M --max-size 2560 --max-fps 120 --video-codec-options="max-b-frames:int=0,bitrate-mode:int=1" --render-driver=direct3d --video-buffer=0"
 set "WIFI_ARGS=--keyboard=!KEYBOARD! --video-codec=h264 --video-bit-rate=15M --max-size 1920 --max-fps 60"
@@ -44,9 +57,31 @@ set "AUTO_RETRY_SEC=2"
 rem ============================================
 rem   主流程：重置 adb -> 检测 USB -> 有线/无线
 rem ============================================
+rem 启动后直接进入主流程识别设备；首次连接向导仅在菜单中选择 [2] 时进入
+goto :main
+:pair_wizard
+echo.
+echo ===== 首次连接向导 =====
+echo.
+echo 第一步：手机/平板开放权限
+echo   1. 进入设置 - 开发者模式（连点版本号 7 次开启）
+echo   2. 打开 USB 调试开关
+echo      小米设备还需打开「USB 调试（安全设置）」
+echo.
+echo 第二步：连接电脑
+echo   1. 用 USB 线将电脑与手机（平板）连接
+echo   2. 完成后按任意键，脚本将自动检测设备并投屏
+echo.
+pause
+goto :main
+
 :main
 
 rem ----- 1. 重置 adb 服务，清理僵死状态 -----
+echo.
+echo [键位] Ctrl+F 参数控件开关（按住 Alt 可拖动控件位置）^| Ctrl+G 复制图片存相册
+echo          Ctrl+H 黑屏省电 ^| Alt+F 切换全屏
+echo.
 echo [1] 重置 adb 服务...
 "!ADB!" kill-server >nul 2>&1
 "!ADB!" start-server >nul 2>&1
@@ -60,6 +95,7 @@ if errorlevel 1 (
 rem ----- 2. 检测 USB 设备（serial 不含冒号且不含 _adb-tls 即为 USB）-----
 echo [2] 检测 USB 设备...
 set "USB_DEV="
+set "USB_HINT="
 for /f "skip=1 tokens=1,2" %%a in ('"!ADB!" devices 2^>nul') do (
     if "%%b"=="device" (
         rem 无线设备 serial 为 IP:端口，含冒号，排除
@@ -122,12 +158,19 @@ if defined CONFIG_SRC (
     set /p LAST_DEVICE=<"!CONFIG_SRC!"
     if not "!LAST_DEVICE!"=="" (
         echo [提示] 尝试连接：!LAST_DEVICE!
-        for /f "delims=" %%r in ('"!ADB!" connect !LAST_DEVICE! 2^>^&1') do echo   结果：%%r
+        rem adb connect 的失败详情是 UTF-8 中文且走 stdout，在 GBK 代码页(936)下显示为乱码，
+        rem 这里吞掉原始输出，成功/失败统一由下面的 adb devices 验证，并显示本脚本自己的提示
+        "!ADB!" connect !LAST_DEVICE! >nul 2>&1
+        echo [提示] 已尝试连接，正在验证设备状态...
         rem 验证连接成功（adb devices 中有该设备且状态为 device）
         for /f "skip=1 tokens=1,2" %%a in ('"!ADB!" devices 2^>nul') do (
             if "%%a"=="!LAST_DEVICE!" if "%%b"=="device" set "WIRE_DEV=!LAST_DEVICE!"
         )
-        if defined WIRE_DEV echo [OK] 连接成功：!WIRE_DEV!
+        if defined WIRE_DEV (
+            echo [OK] 连接成功：!WIRE_DEV!
+        ) else (
+            echo [提示] 连接失败或设备未就绪：!LAST_DEVICE!（请确认同一局域网且无线调试端口已开启）
+        )
     )
 ) else (
     echo [提示] 未找到 config.txt（本目录与上级目录均无）
@@ -163,9 +206,9 @@ if not defined WIRE_DEV (
     echo [提示] 未检测到已连接的无线设备！
     echo.
     echo   请确认：
-    echo     1. 手机和电脑连接同一个 WiFi
-    echo     2. 手机已开启"无线调试"（设置 - 开发者选项）
-    echo     3. 如果从未配对过，请选择 [2] 运行配对向导
+    echo     1. 首次连接请用 USB 线连接电脑
+    echo     2. 无线连接需同一 WiFi，且之前已用 USB 连接过
+    echo     3. 详细配对向导[2]
     echo.
     choice /c 123 /n /m "请选择 [1]重新检测 [2]配对向导 [3]退出："
     if errorlevel 3 (
@@ -196,14 +239,27 @@ rem   动态规格分配：读取设备分辨率（wm size）与峰值刷新率（peak_refresh_rate），
 rem   按 分辨率×刷新率 估算有线 bit-rate；失败回退默认 50M/2560/120fps
 rem ============================================
 rem ============================================
-rem   键盘模式自适应：Android 13+ 用 uhid，老设备回退 aoa
+rem   键盘模式自适应：Android 13+ 用 uhid，Android 12 及以下回退 sdk
+rem   注意：不使用 aoa —— Windows 下 adb 已独占 USB 设备，
+rem   scrcpy 会拒绝 --keyboard=aoa（仅 OTG 模式可用）
+rem   兼容视频档/legacy server 只针对 Android 10 以下（SDK<29），
+rem   避免把 Android 11/12 这类较新设备误判成老设备
 rem ============================================
 :detect_keyboard
 set "KEYBOARD=uhid"
+set "LEGACY_DEVICE="
 set "SDK_VER="
-for /f %%v in ('!ADB! -s !PICK! shell getprop ro.build.version.sdk 2^>nul') do if not "%%v"=="" set "SDK_VER=%%v"
-if defined SDK_VER if !SDK_VER! lss 33 set "KEYBOARD=aoa"
-echo [键盘模式] Android SDK=!SDK_VER! -^> !KEYBOARD!
+set "SDK_IS_NUM="
+rem 命令必须把 !ADB! 用引号包住：路径含空格，未加引号时 FOR /F 只会执行到第一个空格
+for /f "tokens=1" %%v in ('"!ADB!" -s !PICK! shell getprop ro.build.version.sdk 2^>nul') do if not defined SDK_VER set "SDK_VER=%%v"
+rem 只信任纯数字版本号：getprop 失败/异常输出时保持默认 uhid，高版本零污染
+if defined SDK_VER for /f "delims=0123456789" %%d in ("!SDK_VER!") do if not "%%d"=="" set "SDK_IS_NUM=1"
+if not defined SDK_IS_NUM if defined SDK_VER (
+    if !SDK_VER! lss 33 set "KEYBOARD=sdk"
+    if !SDK_VER! lss 29 set "LEGACY_DEVICE=1"
+)
+rem SDK 键盘走 adb 注入，USB/无线全版本可用，是 Windows 下老设备的唯一通用回退
+echo [键盘模式] Android SDK=!SDK_VER! -^> !KEYBOARD! legacy=!LEGACY_DEVICE!
 exit /b
 
 :detect_display_spec
@@ -223,9 +279,14 @@ if "!DEV_FPS!"=="null" set "DEV_FPS="
 if not defined DEV_FPS set "DEV_FPS=60"
 for /f "tokens=1 delims=." %%a in ("!DEV_FPS!") do set "DEV_FPS=%%a"
 if not defined DEV_H (
-    rem 读取/解析失败：回退默认有线规格
-    set "USB_ARGS=--keyboard=!KEYBOARD! --video-codec=h264 --video-bit-rate=50M --max-size 2560 --max-fps 120 --video-codec-options="max-b-frames:int=0,bitrate-mode:int=1" --render-driver=direct3d --video-buffer=0"
-    set "SPEC_INFO=设备规格读取失败，使用默认规格 h264/50M/2560/120fps"
+    rem 读取/解析失败：回退默认有线规格；老设备用兼容档
+    if defined LEGACY_DEVICE (
+        set "USB_ARGS=--keyboard=!KEYBOARD! --video-codec=h264 --video-bit-rate=6M --max-size 720 --max-fps 24 --render-driver=direct3d --video-buffer=0"
+        set "SPEC_INFO=兼容模式 h264/6M/720/24fps（老设备）"
+    ) else (
+        set "USB_ARGS=--keyboard=!KEYBOARD! --video-codec=h264 --video-bit-rate=50M --max-size 2560 --max-fps 120 --video-codec-options="max-b-frames:int=0,bitrate-mode:int=1" --render-driver=direct3d --video-buffer=0"
+        set "SPEC_INFO=设备规格读取失败，使用默认规格 h264/50M/2560/120fps"
+    )
     exit /b 0
 )
 rem 计算：长边 -> max-size（上限 2560）；fps 上限 120；bit-rate 按 分辨率×刷新率 分级估算（clamp 15..80M）
@@ -241,8 +302,23 @@ set /a "BR=!BR!*15"
 if !BR! LSS 15 set "BR=15"
 if !BR! GTR 80 set "BR=80"
 set "USB_BITRATE=!BR!M"
-set "USB_ARGS=--keyboard=!KEYBOARD! --video-codec=h264 --video-bit-rate=!USB_BITRATE! --max-size !MAX_SIZE! --max-fps !DEV_FPS! --video-codec-options="max-b-frames:int=0,bitrate-mode:int=1" --render-driver=direct3d --video-buffer=0"
-set "SPEC_INFO=检测到设备 !DEV_W!x!DEV_H!@!DEV_FPS!Hz，有线规格 h264/!USB_BITRATE!/!MAX_SIZE!/!DEV_FPS!fps"
+rem 键盘模式已在 do_cast 开头统一检测，这里复用结果（避免重复输出 [键盘模式]）
+if defined LEGACY_DEVICE (
+    if !SDK_VER! lss 29 (
+        set "MAX_SIZE=720"
+        set "DEV_FPS=24"
+        set "USB_BITRATE=6M"
+        set "USB_ARGS=--keyboard=!KEYBOARD! --video-codec=h264 --video-bit-rate=!USB_BITRATE! --max-size !MAX_SIZE! --max-fps !DEV_FPS! --render-driver=direct3d --video-buffer=0"
+        set "SPEC_INFO=兼容模式 h264/6M/720/24fps（Android 8 及更早设备）"
+    ) else (
+        if !DEV_FPS! GTR 30 set "DEV_FPS=30"
+        set "USB_ARGS=--keyboard=!KEYBOARD! --video-codec=h264 --video-bit-rate=!USB_BITRATE! --max-size !MAX_SIZE! --max-fps !DEV_FPS! --video-codec-options="max-b-frames:int=0,bitrate-mode:int=1" --render-driver=direct3d --video-buffer=0"
+        set "SPEC_INFO=检测到设备 !DEV_W!x!DEV_H!@!DEV_FPS!Hz，有线规格 h264/!USB_BITRATE!/!MAX_SIZE!/!DEV_FPS!fps（老设备限 30fps）"
+    )
+) else (
+    set "USB_ARGS=--keyboard=!KEYBOARD! --video-codec=h264 --video-bit-rate=!USB_BITRATE! --max-size !MAX_SIZE! --max-fps !DEV_FPS! --video-codec-options="max-b-frames:int=0,bitrate-mode:int=1" --render-driver=direct3d --video-buffer=0"
+    set "SPEC_INFO=检测到设备 !DEV_W!x!DEV_H!@!DEV_FPS!Hz，有线规格 h264/!USB_BITRATE!/!MAX_SIZE!/!DEV_FPS!fps"
+)
 exit /b 0
 
 rem ============================================
@@ -261,9 +337,19 @@ if not defined FIRST_CAST_DONE (
 )
 echo.
 echo ===== 开始投屏：!PICK! =====
-echo   提示：关闭窗口即断开；Alt+f 切换全屏；Ctrl+c 退出
+echo   提示：关闭窗口即断开；Alt+f 切换全屏
 echo.
 call :stop_usb_watch
+call :detect_keyboard
+if defined LEGACY_DEVICE (
+    if !SDK_VER! lss 29 (
+        set "WIFI_ARGS=--keyboard=!KEYBOARD! --video-codec=h264 --video-bit-rate=4M --max-size 720 --max-fps 24"
+    ) else (
+        set "WIFI_ARGS=--keyboard=!KEYBOARD! --video-codec=h264 --video-bit-rate=8M --max-size 1080 --max-fps 30"
+    )
+) else (
+    set "WIFI_ARGS=--keyboard=!KEYBOARD! --video-codec=h264 --video-bit-rate=15M --max-size 1920 --max-fps 60"
+)
 set "CAST_ARGS=!WIFI_ARGS!"
 echo !PICK! | findstr /i ":" >nul 2>&1
 if not errorlevel 1 (
@@ -273,9 +359,15 @@ if not errorlevel 1 (
 ) else (
     rem 有线 USB 连接：动态读取设备分辨率/刷新率，按设备能力分配规格（读取失败回退默认）
     call :detect_display_spec
-    call :detect_keyboard
     set "CAST_ARGS=!USB_ARGS!"
     echo [高清] 有线模式：!SPEC_INFO!（低延迟优化，剪贴板自动同步（电脑复制即达手机））
+)
+rem 所有设备统一使用定制 scrcpy-server：server 内对 SDK<29（Android 10 以下）
+rem 已自动关闭 ABR，保留图片剪贴板等定制功能。若某台老设备仍异常，可手动
+rem 切回最后兜底：把下一行改成 set "SCRCPY_SERVER_PATH=%~dp0scrcpy-server-legacy"
+set "SCRCPY_SERVER_PATH=%~dp0scrcpy-server"
+if defined LEGACY_DEVICE (
+    echo [兼容] 老设备使用定制 server（已自动关闭 ABR，保留图片剪贴板）
 )
 rem ----- 保存当前代码页（scrcpy 可能改成 UTF-8），退出后恢复避免中文乱码 -----
 for /f "tokens=2 delims=:" %%c in ('chcp') do set "OLD_CP=%%c"
@@ -429,17 +521,9 @@ if defined NEED_TCPIP (
         )
         ping -n 2 127.0.0.1 >nul
     )
-    if not defined BACK (
-        echo [提示] 等待超时，设备未恢复，继续尝试投屏（重连时将自动跳过 tcpip）
-    )
     goto :learn_wait_done
 ) else (
     echo [学习] WiFi IP 未变化（!SAVED_IP!），跳过 tcpip（避免重启 adbd 断连）
-)
-:learn_wait_done
-        )
-        ping -n 2 127.0.0.1 >nul
-    )
 )
 :learn_wait_done
 if defined NEED_TCPIP if not defined BACK (
@@ -454,91 +538,6 @@ echo [OK] 已保存无线地址到 config.txt：!WIFI_IP!:5555
 echo.
 exit /b 0
 
-
-rem ============================================
-rem   配对向导（手动配对：adb pair + mDNS 找端口）
-rem ============================================
-:pair_wizard
-echo.
-echo ===== 配对向导 =====
-echo 手机操作：
-echo   1. 设置 - 开发者选项 - 无线调试 - 开启
-echo   2. 点击"使用配对码配对设备"
-echo   3. 记下配对码和 IP:端口
-echo.
-echo [注意] 请确保手机显示的 IP 是 WiFi 地址
-echo        （192.168.x.x 开头），不是 VPN 地址！
-echo.
-set /p PAIR_IP=请输入配对 IP 和端口（如 192.168.31.5:37123）：
-set /p PAIR_CODE=请输入配对码（6位数字）：
-
-echo.
-echo [正在配对...]
-"!ADB!" pair !PAIR_IP! !PAIR_CODE!
-if errorlevel 1 (
-    echo [失败] 配对失败，请检查配对码和 IP 是否正确
-    pause
-    goto :menu
-)
-echo [OK] 配对成功！
-
-rem 提取 IP 部分，用于匹配 mDNS 条目
-for /f "tokens=1 delims=:" %%k in ("%PAIR_IP%") do set "PAIR_HOST=%%k"
-
-echo.
-echo [正在查找连接端口（mDNS）...]
-set "MDNS_PORT="
-for /l %%r in (1,1,5) do (
-    rem mdns 输出格式: 服务名[tab]类型[tab]IP:端口
-    for /f "tokens=1,2,3" %%a in ('"!ADB!" mdns services 2^>nul') do (
-        if "%%b"=="_adb-tls-connect._tcp" (
-            for /f "tokens=1 delims=:" %%x in ("%%c") do (
-                if "%%x"=="!PAIR_HOST!" set "MDNS_PORT=%%c"
-            )
-        )
-    )
-    if defined MDNS_PORT goto :mdns_found
-    ping -n 2 127.0.0.1 >nul
-)
-:mdns_found
-
-if defined MDNS_PORT (
-    set "CONN_IP=!MDNS_PORT!"
-    echo [OK] 自动发现连接端口：!CONN_IP!
-) else (
-    echo [提示] 未能自动发现连接端口
-    echo       请在手机"无线调试"页面查看"IP 地址和端口"
-    set /p CONN_IP=请输入连接 IP 和端口（如 192.168.31.5:41234）：
-)
-
-echo [正在连接...]
-for /f "delims=" %%r in ('"!ADB!" connect !CONN_IP! 2^>^&1') do set "CONN_RESULT=%%r"
-echo !CONN_RESULT!
-echo !CONN_RESULT! | findstr /i "connected" >nul 2>&1
-if errorlevel 1 (
-    echo [失败] 连接失败，请检查 IP 和端口后重试
-    pause
-    goto :menu
-)
-
-> "%CONFIG_FILE%" echo !CONN_IP!
-if exist "%FALLBACK_CONFIG%" (
-    > "%FALLBACK_CONFIG%" echo !CONN_IP!
-)
-echo [OK] 已保存连接信息到 config.txt
-echo.
-echo [完成] 配对并连接成功！回到主流程开始投屏...
-echo [提示] 如果手机还连着 USB，将走有线投屏；拔掉 USB 则走无线投屏
-echo.
-goto :main
-
-rem ============================================
-rem   USB 插线监测（后台 powershell 进程）
-rem   无线投屏期间每 !WATCH_INTERVAL! 秒查一次 adb devices，
-rem   检测到 USB 设备出现则强制结束 scrcpy，
-rem   主循环重新检测后自动切回有线投屏
-rem   进程自行退出条件：检测到 USB 或 scrcpy 已不存在
-rem ============================================
 :start_usb_watch
 call :stop_usb_watch
 start "!WATCH_TAG!" /b powershell -NoProfile -WindowStyle Hidden -Command "$WATCH_TAG='!WATCH_TAG!';$adb='!ADB!';while($true){if(-not(Get-Process scrcpy -ErrorAction SilentlyContinue)){break};$u=& $adb devices 2>$null|Select-Object -Skip 1|Where-Object{$_ -match '\S+\s+(device|unauthorized|offline)\s*$' -and $_ -notmatch ':' -and $_ -notmatch '_adb-tls' -and $_ -notmatch 'emulator'};if($u){Set-Content -Path "$env:TEMP\scrcpy_watch_switch.flag" -Value 1;$wp=Get-Process scrcpy -ErrorAction SilentlyContinue|Where-Object{$_.MainWindowHandle -ne 0};if($wp){[void]$wp.CloseMainWindow()};$dl=(Get-Date).AddSeconds(5);while((Get-Process scrcpy -ErrorAction SilentlyContinue) -and (Get-Date)-lt $dl){Start-Sleep -Milliseconds 200};Get-Process scrcpy -ErrorAction SilentlyContinue|Stop-Process -Force -ErrorAction SilentlyContinue;break};Start-Sleep -Seconds !WATCH_INTERVAL!}"
