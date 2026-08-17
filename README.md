@@ -110,6 +110,12 @@ cd build && PATH=/f/msys64/mingw64/bin:$PATH ninja
 
 ---
 
+
+## 🙏 致谢
+
+- [scrcpy](https://github.com/Genymobile/scrcpy)（Genymobile）—— 本项目的基石，Apache License 2.0 许可
+- [yume-chan 的 PR #6676（Support image clipboard）](https://github.com/Genymobile/scrcpy/pull/6676) —— 图片剪贴板功能借鉴自该 PR
+
 ## 📄 License
 
 Apache License 2.0（继承自 scrcpy 官方）。
