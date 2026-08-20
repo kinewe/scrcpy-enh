@@ -80,6 +80,7 @@ In apps that support clipboard images, you can **paste and send** (long-press th
 
 | Version | Highlights |
 |---|---|
+| **v1.8** | Ctrl+T window always-on-top toggle, glowing status lamp in the overlay (Alt+click the lamp toggles it too) |
 | **v1.7** | ABR interaction/idle dual thresholds (video no longer stuck at 1M — relaxed thresholds when idle, sensitive again on interaction), low-bitrate protection |
 | **v1.6** | ABR delay baseline re-zero (negative pollution fix), single-animation burst detection (tablet stutter fixed), faster bitrate recovery, bat overhaul (mojibake/wizard/shortcuts) |
 | **v1.5** | TSF empty-document block (IME never steals keys, apps stay Chinese), legacy device compatibility (Android 9- auto conservative profile) |

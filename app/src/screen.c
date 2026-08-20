@@ -325,6 +325,48 @@ end:
     sc_sdl_render_present(renderer);
 }
 
+// Interval of the one-shot SDL timer that keeps repainting while a lamp
+// fade (hover or state cross-fade) is animating, so the animation does not
+// depend on video frames arriving.
+#define LAMP_ANIM_TIMER_MS 16
+// Private event type for the lamp animation timer ticks. SDL_EVENT_USER is
+// the base of the scrcpy event range (SC_EVENT_NEW_FRAME), so a value far
+// above the registered events avoids intercepting real events.
+#define SC_LAMP_ANIM_TICK_EVENT (SDL_EVENT_USER + 0x100)
+
+static Uint32 SDLCALL
+sc_screen_lamp_anim_timer_cb(void *userdata, SDL_TimerID timer_id,
+                             Uint32 interval) {
+    (void) userdata;
+    (void) timer_id;
+    (void) interval;
+
+    // Only nudge the UI thread: the event handler repaints and re-arms the
+    // timer if a fade is still running.
+    SDL_Event event = { .type = SC_LAMP_ANIM_TICK_EVENT };
+    SDL_PushEvent(&event);
+    return 0; // one-shot
+}
+
+static void
+sc_screen_arm_lamp_anim_timer(struct sc_screen *screen) {
+    if (screen->lamp_anim_timer) {
+        return; // already armed
+    }
+    screen->lamp_anim_timer =
+        SDL_AddTimer(LAMP_ANIM_TIMER_MS, sc_screen_lamp_anim_timer_cb, NULL);
+}
+
+// arm the repaint timer while any lamp fade is running
+static void
+sc_screen_arm_lamp_anim_if_animating(struct sc_screen *screen) {
+    if (sc_fps_overlay_is_lamp_hover_animating(&screen->fps_overlay)
+            || sc_fps_overlay_is_lamp_state_animating(
+                &screen->fps_overlay)) {
+        sc_screen_arm_lamp_anim_timer(screen);
+    }
+}
+
 static void
 sc_screen_request_resize_display(struct sc_screen *screen, uint16_t width,
                                  uint16_t height) {
@@ -503,6 +545,8 @@ sc_screen_init(struct sc_screen *screen,
 
     screen->resize_pending = false;
     screen->window_shown = false;
+    screen->always_on_top = params->always_on_top;
+    screen->lamp_anim_timer = 0;
     screen->paused = false;
     screen->resume_frame = NULL;
     screen->orientation = SC_ORIENTATION_0;
@@ -850,6 +894,10 @@ sc_screen_destroy(struct sc_screen *screen) {
     if (screen->disconnect_started) {
         sc_disconnect_destroy(&screen->disconnect);
     }
+    if (screen->lamp_anim_timer) {
+        SDL_RemoveTimer(screen->lamp_anim_timer);
+        screen->lamp_anim_timer = 0;
+    }
     sc_texture_destroy(&screen->tex);
     sc_fps_overlay_destroy(&screen->fps_overlay);
     av_frame_free(&screen->frame);
@@ -1142,6 +1190,35 @@ sc_screen_toggle_fullscreen(struct sc_screen *screen) {
     }
 
     LOGD("Requested %s mode", req_fullscreen ? "fullscreen" : "windowed");
+}
+
+// apply the always-on-top state without arming any lamp animation; used by
+// both the Ctrl+T shortcut (which arms the cross-fade) and the lamp click
+// (which has its own preview fade-out)
+static void
+sc_screen_set_always_on_top(struct sc_screen *screen, bool on_top) {
+    bool ok = SDL_SetWindowAlwaysOnTop(screen->window, on_top);
+    if (!ok) {
+        LOGW("Could not toggle always-on-top mode: %s", SDL_GetError());
+        return;
+    }
+
+    screen->always_on_top = on_top;
+    // keep the fps overlay status lamp in sync
+    sc_fps_overlay_set_always_on_top(&screen->fps_overlay, on_top);
+    // repaint immediately so the lamp updates at once, without waiting for
+    // the next frame
+    sc_screen_render(screen, false);
+    LOGI("Window always-on-top %s", on_top ? "enabled" : "disabled");
+}
+
+void
+sc_screen_toggle_always_on_top(struct sc_screen *screen) {
+    // Ctrl+T: cross-fade the lamp between the two terminal states
+    sc_fps_overlay_start_state_transition(&screen->fps_overlay);
+    sc_screen_set_always_on_top(screen, !screen->always_on_top);
+    // keep repainting while the fade runs, even without video frames
+    sc_screen_arm_lamp_anim_if_animating(screen);
 }
 
 void
@@ -1944,6 +2021,19 @@ sc_screen_apply_keyboard_layout(struct sc_screen *screen, bool english) {
 
 void
 sc_screen_handle_event(struct sc_screen *screen, const SDL_Event *event) {
+    if (event->type == SC_LAMP_ANIM_TICK_EVENT) {
+        // Lamp animation tick: the one-shot timer fired. Repaint while a
+        // fade is still running and re-arm it, otherwise it stops.
+        screen->lamp_anim_timer = 0;
+        if (sc_fps_overlay_is_lamp_hover_animating(&screen->fps_overlay)
+                || sc_fps_overlay_is_lamp_state_animating(
+                    &screen->fps_overlay)) {
+            sc_screen_render(screen, false);
+            sc_screen_arm_lamp_anim_timer(screen);
+        }
+        return;
+    }
+
     switch (event->type) {
         case SC_EVENT_OPEN_WINDOW: {
             struct sc_size *size = event->user.data1;
@@ -2056,14 +2146,85 @@ sc_screen_handle_event(struct sc_screen *screen, const SDL_Event *event) {
             return;
     }
 
-    // Alt+left-drag repositions the fps overlay (hold Alt and drag
-    // the corner widget to move it; the event is consumed, not injected).
+    // Alt+hover over the status lamp drives the "clickable" highlight: the
+    // fade itself is time-based inside the overlay draw, here we only track
+    // the hover state and keep repainting while the fade is still animating
+    // (so it completes even without new video frames).
+    if (event->type == SDL_EVENT_MOUSE_MOTION) {
+        int out_w;
+        int out_h;
+        if (SDL_GetRenderOutputSize(screen->renderer, &out_w, &out_h)) {
+            bool inside =
+                sc_fps_overlay_hit_lamp(&screen->fps_overlay, out_w,
+                                        event->motion.x, event->motion.y);
+            bool alt = SDL_GetModState() & SDL_KMOD_ALT;
+            bool changed =
+                sc_fps_overlay_update_lamp_hover(&screen->fps_overlay,
+                                                 inside, alt);
+            if (changed
+                    || sc_fps_overlay_is_lamp_hover_animating(
+                        &screen->fps_overlay)
+                    || sc_fps_overlay_is_lamp_state_animating(
+                        &screen->fps_overlay)) {
+                sc_screen_render(screen, false);
+            }
+            sc_screen_arm_lamp_anim_if_animating(screen);
+        }
+    }
+    // Pressing/releasing Alt while the cursor rests on the lamp, or the
+    // cursor leaving the window, must refresh (or clear) the hover state
+    // even without a mouse motion event.
+    bool alt_up = event->type == SDL_EVENT_KEY_UP
+                  && (event->key.key == SDLK_LALT
+                      || event->key.key == SDLK_RALT);
+    bool alt_down = event->type == SDL_EVENT_KEY_DOWN
+                    && (event->key.key == SDLK_LALT
+                        || event->key.key == SDLK_RALT);
+    if (alt_up || alt_down || event->type == SDL_EVENT_WINDOW_MOUSE_LEAVE) {
+        int out_w;
+        int out_h;
+        if (SDL_GetRenderOutputSize(screen->renderer, &out_w, &out_h)) {
+            float mx;
+            float my;
+            SDL_GetMouseState(&mx, &my);
+            bool inside = sc_fps_overlay_hit_lamp(&screen->fps_overlay, out_w,
+                                                  mx, my);
+            bool alt = alt_down;
+            bool changed =
+                sc_fps_overlay_update_lamp_hover(&screen->fps_overlay,
+                                                 inside, alt);
+            if (changed
+                    || sc_fps_overlay_is_lamp_hover_animating(
+                        &screen->fps_overlay)
+                    || sc_fps_overlay_is_lamp_state_animating(
+                        &screen->fps_overlay)) {
+                sc_screen_render(screen, false);
+            }
+            sc_screen_arm_lamp_anim_if_animating(screen);
+        }
+    }
+
+    // Alt+click on the fps overlay status lamp toggles always-on-top
+    // (Ctrl+T equivalent); Alt+drag anywhere else repositions the overlay.
+    // Both events are consumed, not injected into the device.
     if (event->type == SDL_EVENT_MOUSE_BUTTON_DOWN
             && event->button.button == SDL_BUTTON_LEFT
             && (SDL_GetModState() & SDL_KMOD_ALT)) {
         int out_w;
         int out_h;
         if (SDL_GetRenderOutputSize(screen->renderer, &out_w, &out_h)) {
+            if (sc_fps_overlay_hit_lamp(&screen->fps_overlay, out_w,
+                                        event->button.x, event->button.y)) {
+                // After the click the white preview fades out to the new
+                // lamp state and stays off until the cursor leaves the lamp
+                // strip and comes back.
+                sc_fps_overlay_lamp_clicked(&screen->fps_overlay);
+                sc_screen_set_always_on_top(screen,
+                                            !screen->always_on_top);
+                // keep repainting while the preview fades out
+                sc_screen_arm_lamp_anim_if_animating(screen);
+                return;
+            }
             int ox;
             int oy;
             sc_fps_overlay_get_pos(&screen->fps_overlay, out_w, &ox, &oy);
@@ -2079,31 +2240,13 @@ sc_screen_handle_event(struct sc_screen *screen, const SDL_Event *event) {
         if (!SDL_GetRenderOutputSize(screen->renderer, &out_w, &out_h)) {
             return;
         }
-        // Keep the whole widget inside the window: clamp the top-left
-        // corner to [0, out - tex] on both axes (dragging must not
-        // move the widget out of view).
-        int max_x = out_w - screen->fps_overlay.tex_w;
-        int max_y = out_h - screen->fps_overlay.tex_h;
-        // A window smaller than the texture would make the clamp range
-        // negative; fall back to 0 so the widget stays visible
-        if (max_x < 0) {
-            max_x = 0;
-        }
-        if (max_y < 0) {
-            max_y = 0;
-        }
         int nx = (int) event->motion.x - screen->overlay_drag_dx;
         int ny = (int) event->motion.y - screen->overlay_drag_dy;
-        if (nx < 0) {
-            nx = 0;
-        } else if (nx > max_x) {
-            nx = max_x;
-        }
-        if (ny < 0) {
-            ny = 0;
-        } else if (ny > max_y) {
-            ny = max_y;
-        }
+        // Keep the whole widget outline (including the lamp strip on the
+        // left) inside the window, so the lamp stays clickable even when
+        // the overlay is dragged against an edge.
+        sc_fps_overlay_clamp_pos(&screen->fps_overlay, out_w, out_h,
+                                 &nx, &ny);
         sc_fps_overlay_set_pos(&screen->fps_overlay, nx, ny);
         sc_screen_render(screen, false);
         return;

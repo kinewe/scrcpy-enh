@@ -1304,6 +1304,18 @@ sc_input_manager_process_key(struct sc_input_manager *im,
         return;
     }
 
+    // Ctrl+T: toggle the window always-on-top state. Same interception
+    // pattern as Ctrl+G/F/H: never forwarded to the device, works with a
+    // Chinese IME active. T matches "top" for easy recall. The bare T key
+    // (without Ctrl) is already used in camera mode to toggle the torch, but
+    // the Ctrl modifier keeps the two bindings distinct.
+    if (down && !repeat && ctrl && !shift
+            && !(event->mod & SDL_KMOD_ALT) && !(event->mod & SDL_KMOD_GUI)
+            && sdl_keycode == SDLK_T) {
+        sc_screen_toggle_always_on_top(im->screen);
+        return;
+    }
+
     // Shortcuts that do not involve the MOD key
     switch (sdl_keycode) {
         case SDLK_F11:

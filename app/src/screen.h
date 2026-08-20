@@ -55,6 +55,11 @@ struct sc_screen {
     struct sc_fps_counter fps_counter;
     struct sc_fps_overlay fps_overlay;
 
+    // One-shot SDL timer that keeps repainting while a lamp fade (hover or
+    // state cross-fade) is animating, independent of video frames; 0 when
+    // not armed.
+    SDL_TimerID lamp_anim_timer;
+
     // Alt+left-drag repositions the fps overlay (grab offset = mouse - origin)
     bool overlay_dragging;
     int overlay_drag_dx;
@@ -96,6 +101,8 @@ struct sc_screen {
     // rectangle of the content (excluding black borders)
     struct SDL_FRect rect;
     bool window_shown;
+    // current always-on-top state (Ctrl+T toggles at runtime)
+    bool always_on_top;
 
     // only accessed from the thread calling sc_frame_sink_ops functions
     struct sc_stream_session current_session;
@@ -231,6 +238,10 @@ sc_screen_toggle_fullscreen(struct sc_screen *screen);
 // toggle the fps overlay visibility (Ctrl+F); session-only state
 void
 sc_screen_toggle_fps_overlay(struct sc_screen *screen);
+
+// toggle the window always-on-top state (Ctrl+T); session-only state
+void
+sc_screen_toggle_always_on_top(struct sc_screen *screen);
 
 // resize window to optimal size (remove black borders)
 void
