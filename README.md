@@ -78,6 +78,12 @@
 | **Ctrl+T** | 投屏窗口置顶开关（或按住 **Alt** 点击参数控件左侧指示灯，效果相同）|
 | **Alt+F** | 全屏 |
 
+> 💡 **置顶指示**：参数控件左侧的指示灯——置顶时亮橙灯，未置顶为灰点。按住 **Alt** 点击指示灯可激活/取消窗口置顶，与 **Ctrl+T** 效果相同，再次点击可取消置顶。
+
+<p align="center"><img src="images/overlay-indicator-1.png" alt="置顶指示灯 1" width="380"></p>
+
+<p align="center"><img src="images/overlay-indicator-2.png" alt="置顶指示灯 2" width="380"></p>
+
 ---
 
 ## 📜 版本特性
